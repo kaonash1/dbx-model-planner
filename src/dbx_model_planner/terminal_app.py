@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 from .catalog import list_example_models, resolve_example_model
 from .config import AppConfig
-from .domain import WorkloadProfile, WorkspaceInventorySnapshot
+from .domain import WorkloadProfile, WorkspaceComputeProfile, WorkspaceInventorySnapshot
 from .planners import build_deployment_hint, recommend_compute_for_model, recommend_models_for_compute
 from .presentation import render_compute_fit, render_deployment_hint, render_inventory, render_model_recommendation
 
@@ -117,7 +117,7 @@ def _choose_compute(
     *,
     input_fn: InputFn,
     output_fn: OutputFn,
-):
+) -> WorkspaceComputeProfile | None:
     output_fn("")
     output_fn("Choose compute:")
     for index, compute in enumerate(inventory.compute, start=1):

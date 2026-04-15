@@ -43,8 +43,6 @@ def arm_sku_candidates_from_node_type(node_type_id: str) -> list[str]:
 
     if not normalized.startswith("Standard_"):
         candidates.append(f"Standard_{base}")
-    else:
-        candidates.append(f"Standard_{base}")
 
     if "_" not in base:
         candidates.append(f"Standard_{base.upper()}")

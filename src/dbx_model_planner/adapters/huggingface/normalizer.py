@@ -317,7 +317,7 @@ def _dependency_hints(
     return sorted(dict.fromkeys(hints))
 
 
-def _collect_dtypes(config: Mapping[str, Any], tags: set[str]) -> list[str]:
+def _collect_dtypes(config: Mapping[str, Any], tags: Iterable[str]) -> list[str]:
     dtype_options: set[str] = set()
     for key in ("torch_dtype", "dtype", "model_dtype"):
         value = config.get(key)
@@ -329,7 +329,7 @@ def _collect_dtypes(config: Mapping[str, Any], tags: set[str]) -> list[str]:
     return sorted(dtype_options)
 
 
-def _collect_quantization_options(config: Mapping[str, Any], tags: set[str]) -> list[str]:
+def _collect_quantization_options(config: Mapping[str, Any], tags: Iterable[str]) -> list[str]:
     options: set[str] = set()
     for key in ("quantization", "quantization_config", "load_in_8bit", "load_in_4bit"):
         value = config.get(key)

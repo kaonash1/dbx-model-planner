@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from ...domain.profiles import CostProfile, WorkspaceComputeProfile
+from ...engines.cost import build_cost_profile
 from .pricing import (
     AzureRetailPriceQuery,
     AzureRetailPriceRecord,
@@ -56,21 +57,18 @@ def build_azure_cost_profile(
     vat_rate: float,
     currency_code: str,
 ) -> CostProfile:
-    """Compose a cost profile without discovering DBU pricing."""
+    """Compose a cost profile without discovering DBU pricing.
 
-    if vm_hourly_rate is None and dbu_hourly_rate is None:
-        return CostProfile(currency_code=currency_code)
+    Delegates to the canonical ``build_cost_profile`` in the cost engine so
+    the formula is never duplicated.
+    """
 
-    estimated_hourly_rate = round((vm_hourly_rate or 0.0) + (dbu_hourly_rate or 0.0), 4)
-    discounted_hourly_rate = round(estimated_hourly_rate * (1.0 - discount_rate), 4)
-    vat_adjusted_hourly_rate = round(discounted_hourly_rate * (1.0 + vat_rate), 4)
-    return CostProfile(
+    return build_cost_profile(
+        vm_hourly_rate=vm_hourly_rate,
+        dbu_hourly_rate=dbu_hourly_rate,
+        discount_rate=discount_rate,
+        vat_rate=vat_rate,
         currency_code=currency_code,
-        vm_hourly_rate=round(vm_hourly_rate, 4) if vm_hourly_rate is not None else None,
-        dbu_hourly_rate=round(dbu_hourly_rate, 4) if dbu_hourly_rate is not None else None,
-        estimated_hourly_rate=estimated_hourly_rate,
-        discounted_hourly_rate=discounted_hourly_rate,
-        vat_adjusted_hourly_rate=vat_adjusted_hourly_rate,
     )
 
 

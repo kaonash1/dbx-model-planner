@@ -29,7 +29,6 @@ _LOCATION_TO_REGION = {
     "germanycentral": "germanywestcentral",
     "germanywestcentral": "germanywestcentral",
     "indiacentral": "centralindia",
-    "indiacentral": "centralindia",
     "indiasouth": "southindia",
     "japaneast": "japaneast",
     "japanwest": "japanwest",
@@ -58,9 +57,7 @@ _LOCATION_TO_REGION = {
     "westus2": "westus2",
     "westus3": "westus3",
     "euwest": "westeurope",
-    "euwest": "westeurope",
     "eunorth": "northeurope",
-    "northeurope": "northeurope",
     "west europe": "westeurope",
     "eu west": "westeurope",
     "europe west": "westeurope",
@@ -311,8 +308,8 @@ def parse_azure_retail_price_item(payload: Mapping[str, Any]) -> AzureRetailPric
         savings_plan.append(
             AzureRetailPriceSavingsPlan(
                 term=str(plan.get("term") or plan.get("reservationTerm") or ""),
-                unit_price=plan.get("unitPrice") if plan.get("unitPrice") is None else _coerce_float(plan.get("unitPrice")),
-                retail_price=plan.get("retailPrice") if plan.get("retailPrice") is None else _coerce_float(plan.get("retailPrice")),
+                unit_price=None if plan.get("unitPrice") is None else _coerce_float(plan.get("unitPrice")),
+                retail_price=None if plan.get("retailPrice") is None else _coerce_float(plan.get("retailPrice")),
             )
         )
 
@@ -373,6 +370,9 @@ def _read_json(url: str, opener: Callable[[str, float], Any] | None, timeout: fl
     if opener is None:
         request = Request(url, headers={"User-Agent": "dbx-model-planner/0.1"})
         with urlopen(request, timeout=timeout) as response:  # type: ignore[arg-type]
+            status = getattr(response, "status", None) or getattr(response, "code", None)
+            if status is not None and status >= 400:
+                raise RuntimeError(f"Azure Retail Prices API returned HTTP {status} for {url}")
             payload = response.read()
     else:
         response = opener(url, timeout)

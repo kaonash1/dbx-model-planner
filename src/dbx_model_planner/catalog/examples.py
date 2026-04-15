@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from ..adapters.huggingface import HuggingFaceNormalizedModel, normalize_huggingface_repo_metadata
@@ -146,10 +147,20 @@ _EXAMPLE_MODELS: tuple[ExampleModelEntry, ...] = (
 )
 
 
+@lru_cache(maxsize=None)
+def _normalize_example(key: str) -> HuggingFaceNormalizedModel:
+    """Normalize and cache an example model entry by key."""
+
+    for entry in _EXAMPLE_MODELS:
+        if entry.key == key:
+            return normalize_huggingface_repo_metadata(entry.raw_metadata)
+    raise KeyError(f"Unknown example model key: {key}")
+
+
 def list_example_models() -> list[tuple[str, str, str]]:
     models = []
     for entry in _EXAMPLE_MODELS:
-        normalized = normalize_huggingface_repo_metadata(entry.raw_metadata)
+        normalized = _normalize_example(entry.key)
         models.append((entry.key, entry.label, normalized.model_profile.model_id))
     return models
 
@@ -157,7 +168,7 @@ def list_example_models() -> list[tuple[str, str, str]]:
 def resolve_example_model(model_ref: str) -> HuggingFaceNormalizedModel:
     needle = model_ref.strip().lower()
     for entry in _EXAMPLE_MODELS:
-        normalized = normalize_huggingface_repo_metadata(entry.raw_metadata)
+        normalized = _normalize_example(entry.key)
         if needle in {
             entry.key.lower(),
             entry.label.lower(),

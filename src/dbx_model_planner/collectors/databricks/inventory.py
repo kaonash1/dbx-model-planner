@@ -161,7 +161,7 @@ def _parse_node_type(entry: Any) -> WorkspaceComputeProfile:
         gpu_family=_optional_string_value(mapping.get("gpu_family")),
         gpu_count=_int_value(mapping.get("gpu_count", 0), "gpu_count"),
         gpu_memory_gb=_optional_float_value(mapping.get("gpu_memory_gb")),
-        vcpu_count=_optional_int_value(mapping.get("vcpu_count")),
+        vcpu_count=_optional_int_value(mapping.get("vcpu_count"), "vcpu_count"),
         memory_gb=_optional_float_value(mapping.get("memory_gb")),
         local_disk_gb=_optional_float_value(mapping.get("local_disk_gb")),
         runtime_ids=[str(value) for value in _sequence_value(mapping.get("runtime_ids", []), "runtime_ids")],
@@ -270,10 +270,10 @@ def _int_value(value: Any, field_name: str) -> int:
     return value
 
 
-def _optional_int_value(value: Any) -> int | None:
+def _optional_int_value(value: Any, field_name: str = "integer_field") -> int | None:
     if value is None:
         return None
-    return _int_value(value, "vcpu_count")
+    return _int_value(value, field_name)
 
 
 def _optional_float_value(value: Any) -> float | None:

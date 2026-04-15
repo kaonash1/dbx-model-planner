@@ -44,7 +44,8 @@ class SQLiteSnapshotStore:
         """Create the schema if it does not already exist."""
 
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+
+        def _init(connection: sqlite3.Connection) -> None:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute(
                 """
@@ -63,6 +64,8 @@ class SQLiteSnapshotStore:
                 ON snapshots(kind, subject_id, created_at DESC)
                 """
             )
+
+        self._execute_with_connection(_init)
 
     def save_inventory_snapshot(
         self,
@@ -138,7 +141,7 @@ class SQLiteSnapshotStore:
         created = created_at or datetime.now(timezone.utc)
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
-        with self._connect() as connection:
+        def _insert(connection: sqlite3.Connection) -> None:
             connection.execute(
                 """
                 INSERT INTO snapshots (snapshot_id, kind, subject_id, created_at, payload)
@@ -152,6 +155,8 @@ class SQLiteSnapshotStore:
                 (record_id, kind, subject_id, created.isoformat(), serialized),
             )
 
+        self._execute_with_connection(_insert)
+
         return SnapshotRecord(snapshot_id=record_id, kind=kind, subject_id=subject_id, created_at=created)
 
     def _fetch_snapshot(
@@ -161,7 +166,8 @@ class SQLiteSnapshotStore:
         subject_id: str | None,
         snapshot_id: str | None,
     ) -> sqlite3.Row | None:
-        with self._connect() as connection:
+
+        def _query(connection: sqlite3.Connection) -> sqlite3.Row | None:
             connection.row_factory = sqlite3.Row
             if snapshot_id is not None:
                 row = connection.execute(
@@ -199,10 +205,28 @@ class SQLiteSnapshotStore:
             ).fetchone()
             return row
 
+        return self._execute_with_connection(_query)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _execute_with_connection(self, fn):
+        """Open a connection, call *fn* with it, then close it.
+
+        The ``with connection:`` context manager only commits/rolls-back the
+        transaction; it does **not** call ``connection.close()``.  On Windows
+        this leaves the file locked, causing ``TemporaryDirectory`` cleanup to
+        fail in tests.
+        """
+
+        connection = self._connect()
+        try:
+            with connection:
+                return fn(connection)
+        finally:
+            connection.close()
 
 
 def _inventory_snapshot_to_payload(snapshot: WorkspaceInventorySnapshot) -> dict[str, Any]:

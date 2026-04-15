@@ -11,6 +11,7 @@ from dbx_model_planner.domain import (
     WorkloadProfile,
     WorkspaceComputeProfile,
     WorkspaceInventorySnapshot,
+    WorkspacePolicyProfile,
 )
 from dbx_model_planner.engines.cost import compose_cost_profile
 from dbx_model_planner.engines.fit import assess_compute_for_models, infer_model_family_range, rank_compute_candidates
@@ -23,10 +24,23 @@ def _default_hosting_mode(workload: WorkloadProfile) -> HostingMode:
 def _filter_compute_by_preferences(
     config: AppConfig,
     compute_options: list[WorkspaceComputeProfile],
+    policies: list[WorkspacePolicyProfile] | None = None,
 ) -> tuple[list[WorkspaceComputeProfile], list[str]]:
     blocked_node_types = set(config.workspace.blocked_node_types)
     blocked_skus = set(config.workspace.blocked_skus)
     blocked_gpu_families = {value.lower() for value in config.workspace.blocked_gpu_families}
+
+    # Collect policy-level constraints
+    policy_blocked: set[str] = set()
+    policy_allowed: set[str] | None = None
+    for policy in policies or []:
+        policy_blocked.update(policy.blocked_node_types)
+        if policy.allowed_node_types:
+            if policy_allowed is None:
+                policy_allowed = set(policy.allowed_node_types)
+            else:
+                policy_allowed |= set(policy.allowed_node_types)
+
     filtered: list[WorkspaceComputeProfile] = []
     notes: list[str] = []
 
@@ -41,6 +55,12 @@ def _filter_compute_by_preferences(
             continue
         if gpu_family and gpu_family in blocked_gpu_families:
             notes.append(f"Skipped {compute.node_type_id} because its GPU family is blocked in config.")
+            continue
+        if compute.node_type_id in policy_blocked:
+            notes.append(f"Skipped {compute.node_type_id} because it is blocked by workspace policy.")
+            continue
+        if policy_allowed is not None and compute.node_type_id not in policy_allowed:
+            notes.append(f"Skipped {compute.node_type_id} because it is not in the workspace policy allow list.")
             continue
         filtered.append(compute)
 
@@ -57,7 +77,9 @@ def recommend_compute_for_model(
 ) -> HostingRecommendation:
     vm_pricing = vm_pricing or {}
     dbu_pricing = dbu_pricing or {}
-    eligible_compute, filtering_notes = _filter_compute_by_preferences(config, inventory.compute)
+    eligible_compute, filtering_notes = _filter_compute_by_preferences(
+        config, inventory.compute, policies=inventory.policies,
+    )
 
     candidates = rank_compute_candidates(model, workload, eligible_compute)
     enriched_candidates: list[CandidateCompute] = []
