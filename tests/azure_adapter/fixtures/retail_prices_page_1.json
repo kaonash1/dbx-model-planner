@@ -1,0 +1,28 @@
+{
+  "BillingCurrency": "USD",
+  "Count": 1,
+  "NextPageLink": "https://prices.azure.com/api/retail/prices?$skip=1000",
+  "Items": [
+    {
+      "currencyCode": "USD",
+      "retailPrice": 3.25,
+      "unitPrice": 3.25,
+      "armRegionName": "westeurope",
+      "location": "EU West",
+      "effectiveStartDate": "2024-01-01T00:00:00Z",
+      "meterId": "meter-1",
+      "meterName": "NC4as T4 v3",
+      "productId": "prod-1",
+      "skuId": "sku-1",
+      "productName": "Virtual Machines NCasT4 v3 Series",
+      "skuName": "NC4as T4 v3",
+      "serviceName": "Virtual Machines",
+      "serviceId": "service-1",
+      "serviceFamily": "Compute",
+      "unitOfMeasure": "1 Hour",
+      "type": "Consumption",
+      "isPrimaryMeterRegion": true,
+      "armSkuName": "Standard_NC4as_T4_v3"
+    }
+  ]
+}

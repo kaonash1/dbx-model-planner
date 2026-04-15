@@ -1,0 +1,154 @@
+{
+  "workspace_url": "https://adb-1234567890123456.7.azuredatabricks.net",
+  "cloud": "azure",
+  "region": "eastus2",
+  "node_types": [
+    {
+      "node_type_id": "Standard_D3_v2",
+      "cloud": "azure",
+      "region": "eastus2",
+      "gpu_family": null,
+      "gpu_count": 0,
+      "gpu_memory_gb": null,
+      "vcpu_count": 4,
+      "memory_gb": 14.0,
+      "local_disk_gb": 100.0,
+      "runtime_ids": [
+        "14.3.x-scala2.12",
+        "15.0.x-scala2.12"
+      ],
+      "supported_hosting_modes": [
+        "classic_compute",
+        "batch_compute"
+      ],
+      "policy_ids": [
+        "policy-general"
+      ]
+    },
+    {
+      "node_type_id": "Standard_NC6s_v3",
+      "cloud": "azure",
+      "region": "eastus2",
+      "gpu_family": "nvidia-tesla-v100",
+      "gpu_count": 1,
+      "gpu_memory_gb": 16.0,
+      "vcpu_count": 6,
+      "memory_gb": 112.0,
+      "local_disk_gb": 340.0,
+      "runtime_ids": [
+        "14.3.x-gpu-ml-scala2.12"
+      ],
+      "supported_hosting_modes": [
+        "classic_compute",
+        "custom_serving"
+      ],
+      "policy_ids": [
+        "policy-gpu"
+      ]
+    }
+  ],
+  "dbr_versions": [
+    {
+      "runtime_id": "14.3.x-scala2.12",
+      "dbr_version": "14.3 LTS",
+      "ml_runtime": false,
+      "gpu_enabled": false,
+      "photon_supported": true,
+      "cuda_version": null,
+      "python_version": "3.10",
+      "supported_engines": [
+        "spark"
+      ],
+      "notes": [
+        "general-purpose CPU runtime"
+      ]
+    },
+    {
+      "runtime_id": "15.0.x-scala2.12",
+      "dbr_version": "15.0",
+      "ml_runtime": false,
+      "gpu_enabled": false,
+      "photon_supported": true,
+      "cuda_version": null,
+      "python_version": "3.11",
+      "supported_engines": [
+        "spark"
+      ],
+      "notes": [
+        "newer general-purpose runtime"
+      ]
+    },
+    {
+      "runtime_id": "14.3.x-gpu-ml-scala2.12",
+      "dbr_version": "14.3 LTS ML",
+      "ml_runtime": true,
+      "gpu_enabled": true,
+      "photon_supported": false,
+      "cuda_version": "12.1",
+      "python_version": "3.10",
+      "supported_engines": [
+        "spark",
+        "mlflow"
+      ],
+      "notes": [
+        "GPU ML runtime"
+      ]
+    }
+  ],
+  "policies": [
+    {
+      "policy_id": "policy-general",
+      "policy_name": "general-purpose",
+      "allowed_node_types": [
+        "Standard_D3_v2"
+      ],
+      "blocked_node_types": [],
+      "allowed_runtime_ids": [
+        "14.3.x-scala2.12",
+        "15.0.x-scala2.12"
+      ],
+      "required_tags": {
+        "team": "ml-platform"
+      }
+    },
+    {
+      "policy_id": "policy-gpu",
+      "policy_name": "gpu-ml",
+      "allowed_node_types": [
+        "Standard_NC6s_v3"
+      ],
+      "blocked_node_types": [],
+      "allowed_runtime_ids": [
+        "14.3.x-gpu-ml-scala2.12"
+      ],
+      "required_tags": {
+        "purpose": "inference"
+      }
+    }
+  ],
+  "pools": [
+    {
+      "pool_id": "pool-shared-small",
+      "pool_name": "shared-small",
+      "node_type_id": "Standard_D3_v2",
+      "runtime_id": "14.3.x-scala2.12",
+      "policy_id": "policy-general",
+      "notes": [
+        "pools are preserved as a collector gap"
+      ]
+    },
+    {
+      "pool_id": "pool-gpu",
+      "pool_name": "gpu-pool",
+      "node_type_id": "Standard_NC6s_v3",
+      "runtime_id": "14.3.x-gpu-ml-scala2.12",
+      "policy_id": "policy-gpu",
+      "notes": [
+        "pool coverage lives outside the core domain model"
+      ]
+    }
+  ],
+  "notes": [
+    "fixture-backed mock mode"
+  ]
+}
