@@ -9,10 +9,12 @@ description = "Planner for mapping models to Azure Databricks compute, runtimes,
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "rich>=13,<15",
+  "typer>=0.12,<1.0",
 ]
 
 [project.scripts]
-dbx-model-planner = "dbx_model_planner.cli:main"
+dbx-model-planner = "dbx_model_planner.cli:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

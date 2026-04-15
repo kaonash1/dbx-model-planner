@@ -17,20 +17,22 @@ It is not a deployment orchestrator yet. Keep it that way until the live invento
 From `/home/luka/Workspace/dbx-model-planner`:
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
-PYTHONPATH=src python3 -m dbx_model_planner inventory sync
-PYTHONPATH=src python3 -m dbx_model_planner model examples
-PYTHONPATH=src python3 -m dbx_model_planner model fit mistral-7b-instruct
-PYTHONPATH=src python3 -m dbx_model_planner compute fit Standard_NC6s_v3
-PYTHONPATH=src python3 -m dbx_model_planner price estimate Standard_NC6s_v3 --vm-rate 3.25 --dbu-rate 0.75
-PYTHONPATH=src python3 -m dbx_model_planner deploy plan qwen2-vl-2b-instruct
+UV_CACHE_DIR=.uv-cache uv run python -m unittest discover -s tests -p 'test_*.py'
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner app
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner inventory sync
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner model examples
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner model fit mistral-7b-instruct
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner compute fit Standard_NC6s_v3
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner price estimate Standard_NC6s_v3 --vm-rate 3.25 --dbu-rate 0.75
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner deploy plan qwen2-vl-2b-instruct
 ```
 
 Use `--json` on planner commands when another tool or agent needs structured output.
 
 ## Main Files
 
-- `src/dbx_model_planner/cli.py`: thin stdlib CLI.
+- `src/dbx_model_planner/cli.py`: thin Typer CLI.
+- `src/dbx_model_planner/terminal_app.py`: lightweight interactive terminal wizard.
 - `src/dbx_model_planner/config.py`: local TOML config plus environment overrides.
 - `src/dbx_model_planner/collectors/databricks/inventory.py`: offline Databricks inventory collector shape.
 - `src/dbx_model_planner/adapters/huggingface/normalizer.py`: HF metadata to `ModelProfile`.
@@ -87,6 +89,6 @@ export DBX_MODEL_PLANNER_PRICING_CURRENCY_CODE="EUR"
 
 - Keep core planner outputs structured and presentation-neutral.
 - Do not add deployment execution, UC registration, or automatic quantization yet.
-- Do not make the CLI depend on rich/TUI libraries.
+- Keep Typer/Rich limited to the CLI and presentation layer.
 - Keep model fit estimates conservative and explicit about assumptions.
 - Prefer adding small fixtures for new real-world cases before changing heuristics.

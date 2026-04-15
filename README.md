@@ -51,23 +51,24 @@ The planning engine then applies family-specific heuristics where needed.
 
 The current implementation runs without Databricks or Hugging Face credentials by using bundled fixtures and example models.
 
-There is no live GUI yet. A static visual walkthrough is available at [docs/demo.html](./docs/demo.html).
-
 From the project root:
 
 ```bash
-PYTHONPATH=src python3 -m dbx_model_planner --help
-PYTHONPATH=src python3 -m dbx_model_planner inventory sync
-PYTHONPATH=src python3 -m dbx_model_planner model examples
-PYTHONPATH=src python3 -m dbx_model_planner model fit mistral-7b-instruct
-PYTHONPATH=src python3 -m dbx_model_planner compute fit Standard_NC6s_v3
-PYTHONPATH=src python3 -m dbx_model_planner price estimate Standard_NC6s_v3 --vm-rate 3.25 --dbu-rate 0.75
-PYTHONPATH=src python3 -m dbx_model_planner deploy plan qwen2-vl-2b-instruct
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner --help
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner app
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner inventory sync
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner model examples
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner model fit mistral-7b-instruct
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner compute fit Standard_NC6s_v3
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner price estimate Standard_NC6s_v3 --vm-rate 3.25 --dbu-rate 0.75
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner deploy plan qwen2-vl-2b-instruct
 ```
 
 Most commands also support `--json`.
 
-The CLI intentionally uses `argparse` and the Python standard library for now. No runtime dependency install is required for offline checks.
+The `app` command is a small terminal app/wizard for exploring the current offline planner. The other commands remain scriptable.
+
+The CLI uses Typer for command structure and Rich for terminal output. The planner itself stays framework-independent.
 
 ## Docs
 
@@ -82,8 +83,8 @@ The CLI intentionally uses `argparse` and the Python standard library for now. N
 ## Local development
 
 ```bash
-PYTHONPATH=src python3 -m dbx_model_planner --help
-PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'
+UV_CACHE_DIR=.uv-cache uv run python -m dbx_model_planner --help
+UV_CACHE_DIR=.uv-cache uv run python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 If the default user data directory is not writable, the CLI falls back to `/tmp/dbx-model-planner` for local snapshots. You can also pass `--data-dir`.
