@@ -35,6 +35,10 @@ class ModelProfile:
     context_length: int | None = None
     max_batch_size_hint: int | None = None
     architecture: str | None = None
+    # Architecture details for precise KV cache estimation (from config.json).
+    num_hidden_layers: int | None = None
+    num_kv_heads: int | None = None  # GQA key-value heads (often < num_attention_heads)
+    head_dim: int | None = None      # Per-head dimension in attention
     dtype_options: list[str] = field(default_factory=list)
     quantization_options: list[str] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=list)
@@ -98,6 +102,7 @@ class WorkspaceComputeProfile:
     vcpu_count: int | None = None
     memory_gb: float | None = None
     local_disk_gb: float | None = None
+    dbu_per_hour: float | None = None  # Estimated DBUs consumed per hour
     runtime_ids: list[str] = field(default_factory=list)
     supported_hosting_modes: list[HostingMode] = field(default_factory=list)
     policy_ids: list[str] = field(default_factory=list)
