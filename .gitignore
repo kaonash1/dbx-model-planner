@@ -19,9 +19,10 @@ htmlcov/
 !.env.example
 
 # Internal docs (kept local, never committed)
-docs/agent-handoff.md
-docs/development-backlog.md
-docs/mvp-spec.md
+docs/
+
+# Agent skill definitions
+.codex/
 
 # Debug scripts
 _debug_*.py
