@@ -23,7 +23,9 @@ def build_cost_profile(
     if vm_hourly_rate is None and dbu_hourly_rate is None:
         return CostProfile(currency_code=currency_code)
 
-    estimated_hourly_rate = round((vm_hourly_rate or 0.0) + (dbu_hourly_rate or 0.0), 4)
+    vm = vm_hourly_rate or 0.0
+    dbu = dbu_hourly_rate or 0.0
+    estimated_hourly_rate = round(vm + dbu, 4)
     discounted_hourly_rate = round(estimated_hourly_rate * (1.0 - discount_rate), 4)
     vat_adjusted_hourly_rate = round(discounted_hourly_rate * (1.0 + vat_rate), 4)
 
