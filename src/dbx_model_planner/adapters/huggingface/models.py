@@ -5,6 +5,11 @@ from typing import Any, Mapping
 
 from ...domain.profiles import ModelProfile
 
+# -- Shared constants for the HuggingFace adapter --------------------------
+
+HF_API_BASE = "https://huggingface.co/api"
+HF_USER_AGENT = "dbx-model-planner/0.1"
+
 
 @dataclass(slots=True)
 class HuggingFaceRepoMetadata:
@@ -21,6 +26,7 @@ class HuggingFaceRepoMetadata:
     tokenizer: dict[str, Any] = field(default_factory=dict)
     processor: dict[str, Any] = field(default_factory=dict)
     card_data: dict[str, Any] = field(default_factory=dict)
+    safetensors: dict[str, Any] = field(default_factory=dict)
     license_name: str | None = None
     gated: bool = False
     sha: str | None = None
@@ -45,6 +51,7 @@ class HuggingFaceRepoMetadata:
             tokenizer=_as_mapping(raw.get("tokenizer")),
             processor=_as_mapping(raw.get("processor")),
             card_data=_as_mapping(raw.get("card_data")),
+            safetensors=_as_mapping(raw.get("safetensors")),
             license_name=_as_optional_str(raw.get("license_name") or raw.get("license")),
             gated=bool(raw.get("gated", False)),
             sha=_as_optional_str(raw.get("sha") or raw.get("commit_sha")),
