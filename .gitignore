@@ -17,3 +17,8 @@ htmlcov/
 .env
 .env.*
 !.env.example
+
+# Internal docs (kept local, never committed)
+docs/agent-handoff.md
+docs/development-backlog.md
+docs/mvp-spec.md
