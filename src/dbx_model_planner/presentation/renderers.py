@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from dbx_model_planner.domain import ComputeFitReport, DeploymentHint, HostingRecommendation, WorkspaceInventorySnapshot
+from dbx_model_planner.domain import ComputeFitReport, HostingRecommendation, WorkspaceInventorySnapshot
 
 
 def render_json(payload: Any) -> str:
@@ -60,21 +60,4 @@ def render_compute_fit(report: ComputeFitReport) -> str:
             f"- {candidate.model.model_id}: {candidate.fit_level.value}, "
             f"{candidate.recommended_quantization}, est mem {candidate.estimated_memory_gb} GB"
         )
-    return "\n".join(lines)
-
-
-def render_deployment_hint(hint: DeploymentHint) -> str:
-    lines = [hint.summary]
-    if hint.target and hint.target.volume_path:
-        lines.append(f"Volume path: {hint.target.volume_path}")
-    if hint.recommended_node_type_id:
-        lines.append(f"Node type: {hint.recommended_node_type_id}")
-    if hint.recommended_runtime_id:
-        lines.append(f"Runtime: {hint.recommended_runtime_id}")
-    if hint.dependency_notes:
-        lines.append("Notes:")
-        lines.extend(f"- {note}" for note in hint.dependency_notes)
-    if hint.starter_commands:
-        lines.append("Starter:")
-        lines.extend(hint.starter_commands)
     return "\n".join(lines)

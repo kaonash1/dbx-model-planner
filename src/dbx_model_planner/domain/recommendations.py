@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .common import FitLevel, HostingMode, RiskLevel
-from .profiles import CostProfile, DeploymentTarget, ModelProfile, RuntimeProfile, WorkspaceComputeProfile
+from .profiles import CostProfile, ModelProfile, WorkspaceComputeProfile
 
 
 @dataclass(slots=True)
@@ -11,7 +11,6 @@ class CandidateCompute:
     """A compute option evaluated for a specific model/workload pair."""
 
     compute: WorkspaceComputeProfile
-    runtime: RuntimeProfile | None = None
     fit_level: FitLevel = FitLevel.BORDERLINE
     risk_level: RiskLevel = RiskLevel.MEDIUM
     recommended_quantization: str | None = None
@@ -28,7 +27,6 @@ class HostingRecommendation:
     hosting_mode: HostingMode
     summary: str
     candidates: list[CandidateCompute] = field(default_factory=list)
-    deployment_target: DeploymentTarget | None = None
     blocking_issues: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
 
@@ -56,15 +54,3 @@ class ComputeFitReport:
     model_family_ranges: dict[str, str] = field(default_factory=dict)
     blocking_issues: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class DeploymentHint:
-    """A minimal, non-executing deployment hint."""
-
-    summary: str
-    target: DeploymentTarget | None = None
-    recommended_node_type_id: str | None = None
-    recommended_runtime_id: str | None = None
-    dependency_notes: list[str] = field(default_factory=list)
-    starter_commands: list[str] = field(default_factory=list)

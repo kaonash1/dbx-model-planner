@@ -116,5 +116,150 @@ class HuggingFaceAdapterTest(unittest.TestCase):
             normalize_huggingface_repo_metadata({})
 
 
+class SafetensorsFallbackTest(unittest.TestCase):
+    """Test that parameter_count falls back to safetensors data."""
+
+    def test_safetensors_total_used_when_config_has_no_params(self) -> None:
+        """When config lacks num_parameters but safetensors.total is present."""
+        data = {
+            "repository_id": "test/safetensors-total",
+            "pipeline_tag": "text-generation",
+            "tags": ["llm"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                # No num_parameters here
+                "max_position_embeddings": 4096,
+            },
+            "safetensors": {
+                "total": 7000000000,
+                "parameters": {"F16": 7000000000},
+            },
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        self.assertEqual(normalized.model_profile.parameter_count, 7000000000)
+
+    def test_safetensors_parameters_sum_when_total_missing(self) -> None:
+        """When safetensors has no 'total' but has per-dtype parameters dict."""
+        data = {
+            "repository_id": "test/safetensors-sum",
+            "pipeline_tag": "text-generation",
+            "tags": ["llm"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "max_position_embeddings": 4096,
+            },
+            "safetensors": {
+                "parameters": {"F16": 3000000000, "BF16": 4000000000},
+            },
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        self.assertEqual(normalized.model_profile.parameter_count, 7000000000)
+
+    def test_config_num_parameters_takes_precedence(self) -> None:
+        """Config-level num_parameters should be used even if safetensors exists."""
+        data = {
+            "repository_id": "test/config-precedence",
+            "pipeline_tag": "text-generation",
+            "tags": ["llm"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "num_parameters": 8000000000,
+                "max_position_embeddings": 4096,
+            },
+            "safetensors": {
+                "total": 9999999999,  # This should NOT be used
+            },
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        self.assertEqual(normalized.model_profile.parameter_count, 8000000000)
+
+    def test_no_param_count_when_both_missing(self) -> None:
+        """When neither config nor safetensors has parameter info."""
+        data = {
+            "repository_id": "test/no-params",
+            "pipeline_tag": "text-generation",
+            "tags": ["llm"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "max_position_embeddings": 4096,
+            },
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        self.assertIsNone(normalized.model_profile.parameter_count)
+
+
+class InferredQuantizationTest(unittest.TestCase):
+    """Test that quantization options are inferred when not explicitly tagged."""
+
+    def test_bf16_model_gets_bf16_fp16_int8_int4(self) -> None:
+        """BFloat16 model should get bf16, fp16, int8, int4 options."""
+        data = {
+            "repository_id": "test/bf16-model",
+            "pipeline_tag": "text-generation",
+            "tags": ["llm"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "max_position_embeddings": 4096,
+                "torch_dtype": "bfloat16",
+            },
+            "safetensors": {"total": 7000000000},
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        self.assertEqual(
+            normalized.model_profile.quantization_options,
+            ["bf16", "fp16", "int8", "int4"],
+        )
+
+    def test_fp16_model_gets_fp16_int8_int4(self) -> None:
+        """FP16 model without bf16 should get fp16, int8, int4."""
+        data = {
+            "repository_id": "test/fp16-model",
+            "pipeline_tag": "text-generation",
+            "tags": ["llm"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "max_position_embeddings": 4096,
+                "torch_dtype": "float16",
+            },
+            "safetensors": {"total": 7000000000},
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        self.assertEqual(
+            normalized.model_profile.quantization_options,
+            ["fp16", "int8", "int4"],
+        )
+
+    def test_explicit_quant_tags_preserved(self) -> None:
+        """When explicit quant tags exist, they should be kept (not overridden)."""
+        data = {
+            "repository_id": "test/explicit-quant",
+            "pipeline_tag": "text-generation",
+            "tags": ["llm", "gptq", "int4"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "num_parameters": 7000000000,
+                "max_position_embeddings": 4096,
+            },
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        # Explicit tags found, so the inferred defaults should NOT be used
+        self.assertIn("gptq", normalized.model_profile.quantization_options)
+        self.assertIn("int4", normalized.model_profile.quantization_options)
+
+
 if __name__ == "__main__":
     unittest.main()

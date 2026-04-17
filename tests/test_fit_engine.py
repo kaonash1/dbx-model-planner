@@ -6,7 +6,6 @@ from dbx_model_planner.domain.common import FitLevel, ModelFamily, ModelModality
 from dbx_model_planner.domain.profiles import ModelArtifactProfile, ModelProfile, WorkloadProfile, WorkspaceComputeProfile
 from dbx_model_planner.engines.fit import (
     DEFAULT_CONTEXT_LENGTH,
-    DEFAULT_PARAMETER_HEADROOM,
     DEFAULT_RUNTIME_OVERHEAD_GB,
     MemoryEstimate,
     assess_compute_for_models,
@@ -171,17 +170,86 @@ class EstimateModelMemoryTests(unittest.TestCase):
         # Should use 12B active, not 46B total → ~24GB model weight, not ~92GB
         self.assertLess(est.total_gb, 40.0)
 
-    def test_large_context_is_bounded(self) -> None:
+    def test_large_context_scales_kv_cache(self) -> None:
         model_large_ctx = _llm(params_b=7.0, context=131072)
         model_small_ctx = _llm(params_b=7.0, context=4096)
 
         est_large = estimate_model_memory_gb(model_large_ctx, "fp16")
         est_small = estimate_model_memory_gb(model_small_ctx, "fp16")
 
-        # Context is bounded to 8192 internally, so large context shouldn't
-        # cause unbounded KV cache inflation relative to the 4096 baseline
-        ratio = est_large.kv_cache_gb / est_small.kv_cache_gb
-        self.assertLess(ratio, 3.0)
+        # KV cache should scale proportionally with context length
+        # (no artificial cap). 131072/4096 = 32x context → KV scales ~32x
+        self.assertGreater(est_large.kv_cache_gb, est_small.kv_cache_gb * 10)
+        # Total should also be significantly larger
+        self.assertGreater(est_large.total_gb, est_small.total_gb)
+
+    def test_kv_cache_architecture_aware_gqa(self) -> None:
+        """Architecture-aware KV cache uses precise formula for GQA models."""
+        # Llama-3.1-8B-like: 32 layers, 8 KV heads (GQA), head_dim=128
+        model = ModelProfile(
+            model_id="test/llama3-8b",
+            family=ModelFamily.LLM,
+            modality=ModelModality.TEXT,
+            source="test",
+            task="text-generation",
+            parameter_count=8_000_000_000,
+            context_length=8192,
+            num_hidden_layers=32,
+            num_kv_heads=8,
+            head_dim=128,
+            quantization_options=["fp16"],
+        )
+        est = estimate_model_memory_gb(model, "fp16")
+
+        # Precise: 2 * 8 * 128 * 8192 * 2 * 32 / (1024^3) ≈ 1.0 GB
+        self.assertGreater(est.kv_cache_gb, 0.5)
+        self.assertLess(est.kv_cache_gb, 2.0)
+
+    def test_kv_cache_architecture_aware_mha(self) -> None:
+        """Architecture-aware KV cache for MHA (no GQA) gives larger cache."""
+        # Non-GQA model: 32 layers, 32 KV heads (= 32 attn heads), head_dim=128
+        model_mha = ModelProfile(
+            model_id="test/mha-7b",
+            family=ModelFamily.LLM,
+            modality=ModelModality.TEXT,
+            source="test",
+            task="text-generation",
+            parameter_count=7_000_000_000,
+            context_length=4096,
+            num_hidden_layers=32,
+            num_kv_heads=32,
+            head_dim=128,
+            quantization_options=["fp16"],
+        )
+        # GQA model: same params but 8 KV heads
+        model_gqa = ModelProfile(
+            model_id="test/gqa-7b",
+            family=ModelFamily.LLM,
+            modality=ModelModality.TEXT,
+            source="test",
+            task="text-generation",
+            parameter_count=7_000_000_000,
+            context_length=4096,
+            num_hidden_layers=32,
+            num_kv_heads=8,
+            head_dim=128,
+            quantization_options=["fp16"],
+        )
+        est_mha = estimate_model_memory_gb(model_mha, "fp16")
+        est_gqa = estimate_model_memory_gb(model_gqa, "fp16")
+
+        # MHA should have 4x larger KV cache than GQA (32/8 = 4)
+        self.assertAlmostEqual(est_mha.kv_cache_gb / est_gqa.kv_cache_gb, 4.0, places=1)
+
+    def test_kv_cache_fallback_without_architecture(self) -> None:
+        """Without architecture metadata, uses llmfit-style fallback."""
+        model = _llm(params_b=7.0, context=4096)
+        est = estimate_model_memory_gb(model, "fp16")
+
+        # Fallback: 7 * 4096 * 8e-6 ≈ 0.23 GB (floored to 0.1 min)
+        self.assertGreater(est.kv_cache_gb, 0.1)
+        # Should be much less than the old formula (which gave 2.45 GB)
+        self.assertLess(est.kv_cache_gb, 1.0)
 
 
 class AssessModelOnComputeTests(unittest.TestCase):

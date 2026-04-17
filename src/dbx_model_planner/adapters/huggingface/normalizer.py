@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
 from typing import Any, Iterable, Mapping
 
+from ...auth import HuggingFaceCredentials
 from ...domain.common import EstimateSource, ModelFamily, ModelModality
 from ...domain.profiles import ModelArtifactProfile, ModelProfile
-from .models import HuggingFaceArtifactManifest, HuggingFaceNormalizedModel, HuggingFaceRepoMetadata
+from .models import HF_API_BASE, HF_USER_AGENT, HuggingFaceArtifactManifest, HuggingFaceNormalizedModel, HuggingFaceRepoMetadata
 
 _EMBEDDING_PIPELINES = {
     "feature-extraction",
@@ -192,6 +196,17 @@ def _build_model_profile(
         or config.get("n_parameters")
         or config.get("n_params")
     )
+    # Fallback: HF API reports parameter counts in the safetensors field
+    # (data["safetensors"]["total"] or sum of data["safetensors"]["parameters"])
+    if parameter_count is None and metadata.safetensors:
+        parameter_count = _as_int(metadata.safetensors.get("total"))
+        if parameter_count is None:
+            params_by_dtype = metadata.safetensors.get("parameters")
+            if isinstance(params_by_dtype, dict) and params_by_dtype:
+                try:
+                    parameter_count = sum(int(v) for v in params_by_dtype.values())
+                except (TypeError, ValueError):
+                    pass
     active_parameter_count = _as_int(config.get("active_parameter_count") or config.get("active_parameters"))
     context_length = _as_int(
         config.get("context_length")
@@ -199,10 +214,38 @@ def _build_model_profile(
         or config.get("max_seq_len")
         or config.get("seq_length")
     )
-    max_batch_size_hint = _as_int(config.get("max_batch_size") or config.get("batch_size"))
     architecture = _first_text(config.get("architectures")) or _as_optional_text(config.get("model_type"))
+
+    # Architecture details for precise KV cache estimation.
+    # HuggingFace config.json typically contains num_hidden_layers,
+    # num_key_value_heads (GQA), num_attention_heads, hidden_size, head_dim.
+    num_hidden_layers = _as_int(config.get("num_hidden_layers") or config.get("n_layer"))
+    num_attention_heads = _as_int(config.get("num_attention_heads") or config.get("n_head"))
+    num_kv_heads = _as_int(
+        config.get("num_key_value_heads")
+        or config.get("num_kv_heads")
+        or config.get("n_head_kv")
+    )
+    # If KV heads not specified, assume MHA (kv_heads = attention_heads)
+    if num_kv_heads is None and num_attention_heads is not None:
+        num_kv_heads = num_attention_heads
+    # head_dim: explicit or derived from hidden_size / num_attention_heads
+    head_dim = _as_int(config.get("head_dim"))
+    if head_dim is None:
+        hidden_size = _as_int(config.get("hidden_size") or config.get("n_embd") or config.get("d_model"))
+        if hidden_size and num_attention_heads:
+            head_dim = hidden_size // num_attention_heads
+
     dtype_options = _collect_dtypes(config, metadata.tags)
     quantization_options = _collect_quantization_options(config, metadata.tags)
+    # If no explicit quant options found but model has parameters, infer
+    # standard quantization formats that any model can be converted to.
+    if not quantization_options and parameter_count and parameter_count > 0:
+        torch_dtype = str(config.get("torch_dtype", "")).lower()
+        if torch_dtype in ("bfloat16", "bf16"):
+            quantization_options = ["bf16", "fp16", "int8", "int4"]
+        else:
+            quantization_options = ["fp16", "int8", "int4"]
     capabilities = _collect_capabilities(metadata, family, modality)
 
     artifact_profile = ModelArtifactProfile(
@@ -227,8 +270,10 @@ def _build_model_profile(
         parameter_count=parameter_count,
         active_parameter_count=active_parameter_count,
         context_length=context_length,
-        max_batch_size_hint=max_batch_size_hint,
         architecture=architecture,
+        num_hidden_layers=num_hidden_layers,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
         dtype_options=dtype_options,
         quantization_options=quantization_options,
         capabilities=capabilities,
@@ -399,3 +444,128 @@ def _stringify_iterable(value: Any) -> list[str]:
     if value is None:
         return []
     return [str(value)]
+
+
+class HuggingFaceAPIError(Exception):
+    pass
+
+
+class GatedRepoError(HuggingFaceAPIError):
+    pass
+
+
+def fetch_huggingface_metadata(
+    repo_id: str,
+    credentials: HuggingFaceCredentials | None = None,
+    *,
+    revision: str | None = None,
+    timeout: float = 30.0,
+) -> HuggingFaceRepoMetadata:
+    """Fetch Hugging Face repository metadata from the live API.
+
+    Args:
+        repo_id: The Hugging Face repository ID (e.g., "meta-llama/Llama-3.1-8B-Instruct")
+        credentials: Optional HuggingFace credentials for gated repos
+        revision: Optional revision/branch to fetch
+        timeout: Request timeout in seconds
+
+    Returns:
+        HuggingFaceRepoMetadata with repository information
+
+    Raises:
+        GatedRepoError: If the repository requires authentication
+        HuggingFaceAPIError: If the API request fails
+    """
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request
+
+    url = f"{HF_API_BASE}/models/{repo_id}"
+
+    headers: dict[str, str] = {"User-Agent": HF_USER_AGENT}
+    if credentials and credentials.token:
+        headers["Authorization"] = f"Bearer {credentials.token}"
+
+    request = Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # type: ignore[arg-type]
+            data = json.loads(response.read())
+            metadata = _parse_huggingface_api_response(data, repo_id, revision)
+    except HTTPError as exc:
+        if exc.code == 403:
+            raise GatedRepoError(
+                f"Repository '{repo_id}' requires authentication. "
+                "Please provide a HuggingFace token with 'dbx-model-planner auth login'."
+            ) from exc
+        elif exc.code == 404:
+            raise HuggingFaceAPIError(f"Repository '{repo_id}' not found.") from exc
+        else:
+            raise HuggingFaceAPIError(f"API request failed: {exc.code} {exc.reason}") from exc
+    except URLError as exc:
+        raise HuggingFaceAPIError(f"Network error: {exc.reason}") from exc
+
+    # The /api/models/{id} endpoint returns a stripped-down config stub
+    # (typically just architectures, model_type, tokenizer_config).
+    # Fetch the full config.json from the repo to get max_position_embeddings,
+    # num_hidden_layers, num_attention_heads, etc.
+    _FULL_CONFIG_KEYS = {"max_position_embeddings", "max_seq_len", "context_length", "seq_length"}
+    if not any(k in metadata.config for k in _FULL_CONFIG_KEYS):
+        _merge_full_config(metadata, headers, timeout)
+
+    return metadata
+
+
+def _merge_full_config(
+    metadata: HuggingFaceRepoMetadata,
+    headers: dict[str, str],
+    timeout: float,
+) -> None:
+    """Fetch the repo's config.json and merge keys into metadata.config.
+
+    The /api/models/{id} endpoint only returns a config stub (architectures,
+    model_type).  The full config.json in the repo has the real values for
+    max_position_embeddings, num_hidden_layers, num_key_value_heads, etc.
+    Existing keys in metadata.config are NOT overwritten.
+    """
+    rev = metadata.revision or "main"
+    config_url = f"https://huggingface.co/{metadata.repository_id}/resolve/{rev}/config.json"
+    req = urllib.request.Request(config_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # type: ignore[arg-type]
+            full_config: dict[str, Any] = json.loads(resp.read())
+        if isinstance(full_config, dict):
+            # Merge without overwriting existing keys from the API stub
+            for key, value in full_config.items():
+                if key not in metadata.config:
+                    metadata.config[key] = value
+    except Exception:
+        # Non-critical — silently skip if config.json doesn't exist or is invalid
+        pass
+
+
+def _parse_huggingface_api_response(data: dict[str, Any], repo_id: str, revision: str | None) -> HuggingFaceRepoMetadata:
+    siblings = data.get("siblings", [])
+    config = data.get("config", {})
+    if isinstance(config, str):
+        config = {}
+
+    safetensors = data.get("safetensors", {})
+    if isinstance(safetensors, str):
+        safetensors = {}
+
+    return HuggingFaceRepoMetadata(
+        repository_id=repo_id,
+        revision=revision or data.get("revision"),
+        commit_sha=data.get("sha") or data.get("commitHash"),
+        pipeline_tag=data.get("pipeline_tag"),
+        library_name=data.get("library_name"),
+        tags=data.get("tags", []),
+        siblings=[{"rfilename": s.get("rfilename", s) if isinstance(s, dict) else s} for s in siblings],
+        config=config,
+        tokenizer=data.get("tokenizer", {}),
+        processor=data.get("processor", {}),
+        card_data=data.get("card_data", {}),
+        safetensors=safetensors,
+        license_name=data.get("license"),
+        gated=data.get("gated", False),
+        sha=data.get("sha"),
+    )

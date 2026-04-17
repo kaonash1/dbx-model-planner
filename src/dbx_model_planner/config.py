@@ -4,25 +4,59 @@ import json
 import os
 import tomllib
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Mapping
+
+
+class WorkloadType(StrEnum):
+    """Databricks compute workload type.
+
+    Determines the per-DBU price.  The DBU *count* per VM instance is
+    the same across workload types; only the unit price differs.
+    """
+
+    ALL_PURPOSE = "all_purpose"
+    JOBS_COMPUTE = "jobs_compute"
+
+
+# Default per-DBU rates (USD list price, Premium tier).
+# These serve as **fallback** presets when the Azure Retail Prices API
+# has not yet been queried.
+# Correct rates are fetched at runtime via
+# ``dbu_rates.fetch_dbu_unit_prices()`` and stored in the cache.
+WORKLOAD_DBU_PRESETS: dict[WorkloadType, float] = {
+    WorkloadType.ALL_PURPOSE: 0.55,
+    WorkloadType.JOBS_COMPUTE: 0.30,
+}
+
+WORKLOAD_LABELS: dict[WorkloadType, str] = {
+    WorkloadType.ALL_PURPOSE: "All-Purpose Compute",
+    WorkloadType.JOBS_COMPUTE: "Jobs Compute",
+}
+
+_WORKLOAD_CYCLE = [WorkloadType.ALL_PURPOSE, WorkloadType.JOBS_COMPUTE]
 
 
 @dataclass(slots=True)
 class PricingAdjustments:
     """Organization-specific pricing adjustments applied on top of list prices."""
 
-    discount_rate: float = 0.37
+    discount_rate: float = 0.375
     vat_rate: float = 0.19
     currency_code: str = "USD"
+    azure_region: str = "westeurope"
+    price_cache_ttl_seconds: int = 14400  # 4 hours
+    auto_fetch_pricing: bool = True
 
 
 @dataclass(slots=True)
 class DatabricksPricing:
     """Configurable Databricks DBU inputs used by the cost engine."""
 
-    dbu_hourly_rate: float = 0.0
+    dbu_rate_per_unit: float = 0.55  # USD; auto-updated from Azure API
+    workload_type: str = "all_purpose"  # "all_purpose" or "jobs_compute"
 
 
 @dataclass(slots=True)
@@ -74,12 +108,16 @@ DEFAULT_CONFIG_TEMPLATE = dedent(
     # such as DATABRICKS_HOST and DATABRICKS_TOKEN instead of embedding them here.
 
     [pricing]
-    discount_rate = 0.37
+    discount_rate = 0.375
     vat_rate = 0.19
     currency_code = "USD"
+    azure_region = "westeurope"
+    price_cache_ttl_seconds = 14400
+    auto_fetch_pricing = true
 
     [databricks]
-    dbu_hourly_rate = 0.0
+    dbu_rate_per_unit = 0.55
+    workload_type = "all_purpose"
 
     [workspace]
     preferred_regions = []
@@ -161,11 +199,21 @@ def _apply_mapping(config: AppConfig, loaded: Mapping[str, Any]) -> None:
         config.pricing.discount_rate = float(pricing.get("discount_rate", config.pricing.discount_rate))
         config.pricing.vat_rate = float(pricing.get("vat_rate", config.pricing.vat_rate))
         config.pricing.currency_code = str(pricing.get("currency_code", config.pricing.currency_code))
+        config.pricing.azure_region = str(pricing.get("azure_region", config.pricing.azure_region))
+        config.pricing.price_cache_ttl_seconds = int(
+            pricing.get("price_cache_ttl_seconds", config.pricing.price_cache_ttl_seconds)
+        )
+        config.pricing.auto_fetch_pricing = bool(
+            pricing.get("auto_fetch_pricing", config.pricing.auto_fetch_pricing)
+        )
 
     databricks = _mapping_section(loaded, "databricks")
     if databricks:
-        config.databricks.dbu_hourly_rate = float(
-            databricks.get("dbu_hourly_rate", config.databricks.dbu_hourly_rate)
+        config.databricks.dbu_rate_per_unit = float(
+            databricks.get("dbu_rate_per_unit", config.databricks.dbu_rate_per_unit)
+        )
+        config.databricks.workload_type = str(
+            databricks.get("workload_type", config.databricks.workload_type)
         )
 
     workspace = _mapping_section(loaded, "workspace")
@@ -208,9 +256,17 @@ def _apply_env_overrides(config: AppConfig, env: Mapping[str, str]) -> None:
         config.pricing.vat_rate = float(value)
     if value := _first_env(env, "DBX_MODEL_PLANNER_PRICING_CURRENCY_CODE"):
         config.pricing.currency_code = value
+    if value := _first_env(env, "DBX_MODEL_PLANNER_PRICING_AZURE_REGION"):
+        config.pricing.azure_region = value
+    if value := _first_env(env, "DBX_MODEL_PLANNER_PRICING_CACHE_TTL"):
+        config.pricing.price_cache_ttl_seconds = int(value)
+    if value := _first_env(env, "DBX_MODEL_PLANNER_PRICING_AUTO_FETCH"):
+        config.pricing.auto_fetch_pricing = _parse_bool(value)
 
-    if value := _first_env(env, "DBX_MODEL_PLANNER_DATABRICKS_DBU_HOURLY_RATE"):
-        config.databricks.dbu_hourly_rate = float(value)
+    if value := _first_env(env, "DBX_MODEL_PLANNER_DATABRICKS_DBU_RATE_PER_UNIT"):
+        config.databricks.dbu_rate_per_unit = float(value)
+    if value := _first_env(env, "DBX_MODEL_PLANNER_DATABRICKS_WORKLOAD_TYPE"):
+        config.databricks.workload_type = value
 
     if value := _first_env(env, "DBX_MODEL_PLANNER_WORKSPACE_PREFERRED_REGIONS"):
         config.workspace.preferred_regions = _parse_str_list(value)

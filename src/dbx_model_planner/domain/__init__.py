@@ -1,7 +1,6 @@
 from .common import Cloud, EstimateSource, FitLevel, HostingMode, ModelFamily, ModelModality, RiskLevel
 from .profiles import (
     CostProfile,
-    DeploymentTarget,
     ModelArtifactProfile,
     ModelProfile,
     RuntimeProfile,
@@ -10,7 +9,7 @@ from .profiles import (
     WorkspaceInventorySnapshot,
     WorkspacePolicyProfile,
 )
-from .recommendations import CandidateCompute, CandidateModel, ComputeFitReport, DeploymentHint, HostingRecommendation
+from .recommendations import CandidateCompute, CandidateModel, ComputeFitReport, HostingRecommendation
 
 __all__ = [
     "CandidateCompute",
@@ -18,8 +17,6 @@ __all__ = [
     "Cloud",
     "ComputeFitReport",
     "CostProfile",
-    "DeploymentHint",
-    "DeploymentTarget",
     "EstimateSource",
     "FitLevel",
     "HostingMode",

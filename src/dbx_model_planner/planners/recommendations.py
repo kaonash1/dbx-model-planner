@@ -74,6 +74,7 @@ def recommend_compute_for_model(
     workload: WorkloadProfile,
     vm_pricing: dict[str, float] | None = None,
     dbu_pricing: dict[str, float] | None = None,
+    forced_quantization: str | None = None,
 ) -> HostingRecommendation:
     vm_pricing = vm_pricing or {}
     dbu_pricing = dbu_pricing or {}
@@ -81,7 +82,10 @@ def recommend_compute_for_model(
         config, inventory.compute, policies=inventory.policies,
     )
 
-    candidates = rank_compute_candidates(model, workload, eligible_compute)
+    candidates = rank_compute_candidates(
+        model, workload, eligible_compute,
+        forced_quantization=forced_quantization,
+    )
     enriched_candidates: list[CandidateCompute] = []
     for candidate in candidates:
         vm_hourly_rate = vm_pricing.get(candidate.compute.node_type_id)
