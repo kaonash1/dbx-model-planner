@@ -5,14 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dbx-model-planner"
 version = "0.1.0"
-description = "Planner for mapping models to Azure Databricks compute, runtimes, and costs."
+description = "Interactive model-to-compute planner for Azure Databricks."
 readme = "README.md"
+license = "GPL-3.0-only"
 requires-python = ">=3.11"
 dependencies = [
   "keyring>=25.0",
   "rich>=13,<15",
   "typer>=0.12,<1.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/kaonash1/dbx-model-planner"
 
 [project.scripts]
 dbx-model-planner = "dbx_model_planner.cli:app"

@@ -17,59 +17,38 @@ A workspace-aware planner for sizing and costing open models on Azure Databricks
 ### Prerequisites
 
 - Python 3.11+
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - A Databricks workspace with API access
 - A HuggingFace account (optional, needed for gated models)
 
 ### Install
 
 ```bash
+pip install dbx-model-planner
+```
+
+Or from source:
+
+```bash
 git clone https://github.com/kaonash1/dbx-model-planner.git
 cd dbx-model-planner
-uv sync
+pip install .
 ```
 
-### Set up credentials
+### Run
 
 ```bash
-uv run dbx-model-planner auth login
+dbx-model-planner
 ```
 
-This prompts for your Databricks workspace URL, API token, and (optionally) a HuggingFace token. Credentials are stored in the system keyring (Windows Credential Manager, macOS Keychain, or libsecret on Linux) — never written to files.
+On first launch, you'll be prompted for your Databricks workspace URL, API token, and (optionally) a HuggingFace token. Credentials are stored in the system keyring — never written to files.
 
-### Launch the interactive planner
+### Credential management
 
 ```bash
-uv run dbx-model-planner app
+dbx-model-planner auth login    # Configure credentials
+dbx-model-planner auth logout   # Remove stored credentials
+dbx-model-planner auth status   # Show credential status
 ```
-
-This opens the full-screen TUI. Use `--classic` for a simpler text-based menu instead:
-
-```bash
-uv run dbx-model-planner app --classic
-```
-
-### CLI commands
-
-```bash
-# Auth
-uv run dbx-model-planner auth login       # Configure credentials
-uv run dbx-model-planner auth logout      # Remove stored credentials
-uv run dbx-model-planner auth status      # Show credential status
-
-# Interactive planner
-uv run dbx-model-planner app              # Full-screen TUI (default)
-uv run dbx-model-planner app --classic    # Text-based menu
-
-# Inventory
-uv run dbx-model-planner inventory sync   # Sync and cache workspace inventory
-
-# Model planning
-uv run dbx-model-planner model fit meta-llama/Llama-3.1-8B-Instruct
-uv run dbx-model-planner model fit meta-llama/Llama-3.1-70B-Instruct --azure-pricing
-```
-
-Most commands support `--json` for machine-readable output.
 
 ## How estimation works
 
@@ -96,8 +75,8 @@ hourly_cost = (vm_price + dbu_count * dbu_rate) * (1 - discount) * (1 + vat)
 ## Development
 
 ```bash
-uv run pytest tests/ -q          # Run tests
-uv run dbx-model-planner --help  # Show all commands
+pip install -e .
+pytest tests/ -q
 ```
 
 ## Docs

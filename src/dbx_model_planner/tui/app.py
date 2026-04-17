@@ -454,14 +454,11 @@ def _handle_normal_input(
     """Handle keypresses in normal navigation mode."""
 
     if key in ("q", "Q"):
-        if state.view in (View.DETAIL, View.MODEL_FIT, View.MODEL_INPUT, View.MODEL_BROWSE, View.WHAT_IF, View.PRICING_SETUP):
-            _go_back(state)
-        else:
-            state.should_quit = True
+        state.should_quit = True
         return
 
     if key == KEY_ESCAPE:
-        if state.view in (View.DETAIL, View.MODEL_FIT, View.MODEL_INPUT, View.MODEL_BROWSE, View.WHAT_IF, View.PRICING_SETUP):
+        if state.view in (View.MODEL_FIT, View.MODEL_INPUT, View.MODEL_BROWSE, View.WHAT_IF, View.PRICING_SETUP):
             _go_back(state)
         return
 
@@ -544,30 +541,20 @@ def _handle_normal_input(
             state.search_query = ""
         return
 
-    # -- Sort cycling ---------------------------------------------------
-    if key == "s":
-        if state.view == View.INVENTORY:
-            state.cycle_sort()
-        return
-
-    if key == "S":
-        if state.view == View.INVENTORY:
-            state.toggle_sort_direction()
-        return
-
     # -- CPU toggle --------------------------------------------------------
     if key in ("c", "C"):
         if state.view == View.INVENTORY:
             state.toggle_cpu_nodes()
         return
 
-    # -- Model input ----------------------------------------------------
+    # -- Model input (from inventory or model fit only) -------------------
     if key in ("m", "M"):
-        state.previous_view = state.view
-        state.view = View.MODEL_INPUT
-        state.input_mode = InputMode.MODEL_ID
-        state.input_buffer = ""
-        state.status_message = ""
+        if state.view in (View.INVENTORY, View.MODEL_FIT):
+            state.previous_view = state.view
+            state.view = View.MODEL_INPUT
+            state.input_mode = InputMode.MODEL_ID
+            state.input_buffer = ""
+            state.status_message = ""
         return
 
     # -- Browse model catalog -------------------------------------------
@@ -576,17 +563,9 @@ def _handle_normal_input(
             _open_browse(state)
         return
 
-    # -- Quick fit from selected node / fit filter in model fit ----------
+    # -- Fit filter in model fit view ----------------------------------------
     if key in ("f", "F"):
-        if state.view == View.INVENTORY:
-            node = state.selected_node()
-            if node:
-                state.previous_view = state.view
-                state.view = View.MODEL_INPUT
-                state.input_mode = InputMode.MODEL_ID
-                state.input_buffer = ""
-                state.status_message = ""
-        elif state.view == View.MODEL_FIT:
+        if state.view == View.MODEL_FIT:
             state.cycle_fit_filter()
         return
 
@@ -623,33 +602,17 @@ def _handle_normal_input(
         _toggle_workload_type(state, config)
         return
 
-    # -- Tab: toggle CPU nodes / cycle category in browse / toggle what-if selector
+    # -- Tab: cycle category in browse / toggle what-if selector
     if key == KEY_TAB:
-        if state.view == View.INVENTORY:
-            state.toggle_cpu_nodes()
-        elif state.view == View.MODEL_BROWSE:
+        if state.view == View.MODEL_BROWSE:
             _cycle_browse_category(state)
         elif state.view == View.WHAT_IF:
             state.whatif_selector_row = 1 - state.whatif_selector_row
         return
 
-    # -- Enter: detail view / fit from browse ----------------------------
+    # -- Enter: fit from browse -------------------------------------------
     if key == KEY_ENTER:
-        if state.view == View.INVENTORY:
-            node = state.selected_node()
-            if node:
-                state.detail_node = node
-                state.detail_candidate = None
-                state.previous_view = View.INVENTORY
-                state.view = View.DETAIL
-        elif state.view == View.MODEL_FIT:
-            candidate = state.selected_candidate()
-            if candidate:
-                state.detail_candidate = candidate
-                state.detail_node = None
-                state.previous_view = View.MODEL_FIT
-                state.view = View.DETAIL
-        elif state.view == View.MODEL_BROWSE:
+        if state.view == View.MODEL_BROWSE:
             entry = state.selected_browse_entry()
             if entry:
                 # Fit the selected model against workspace
@@ -829,8 +792,6 @@ def _go_back(state: TuiState) -> None:
         state.view = View.INVENTORY
     state.status_message = ""
     state.input_mode = InputMode.NORMAL
-    state.detail_node = None
-    state.detail_candidate = None
 
 
 # -- Browse helpers ---------------------------------------------------------

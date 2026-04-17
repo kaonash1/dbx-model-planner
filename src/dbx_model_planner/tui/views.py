@@ -23,10 +23,8 @@ from ..engines.fit import estimate_model_memory_gb, MemoryEstimate
 from ..engines.plan import QUANTIZATION_OPTIONS, CONTEXT_PRESETS
 from .state import (
     FIT_FILTER_LABELS,
-    SORT_LABELS,
     FitFilter,
     InputMode,
-    SortColumn,
     TuiState,
     View,
 )
@@ -109,9 +107,6 @@ def build_layout(state: TuiState, terminal_height: int = 40) -> ConsoleRenderabl
         layout["body"].update(_render_whatif_view(state, terminal_height - 2))
     elif state.view == View.PRICING_SETUP:
         layout["body"].update(_render_pricing_setup_view(state))
-    elif state.view == View.DETAIL:
-        # Full-screen detail only used if no split pane is active
-        layout["body"].update(_render_detail_panel(state))
     else:
         layout["body"].update(Text(""))
 
@@ -196,8 +191,6 @@ def _render_footer(state: TuiState) -> Text:
 
     if state.view == View.INVENTORY:
         cpu_label = "CPU on" if state.show_cpu_nodes else "CPU off"
-        sort_label = SORT_LABELS.get(state.sort_column, "")
-        sort_dir = "asc" if state.sort_ascending else "desc"
         price_hint = f"[{ACCENT}]$[/{ACCENT}] refresh prices  " if state.pricing_loaded or state.pricing_error else f"[{ACCENT}]$[/{ACCENT}] fetch prices  "
         try:
             wt_short = "AP" if WorkloadType(state.workload_type) == WorkloadType.ALL_PURPOSE else "JC"
@@ -207,12 +200,8 @@ def _render_footer(state: TuiState) -> Text:
             f"  [{ACCENT}]j/k[/{ACCENT}] nav  "
             f"[{ACCENT}]PgUp/Dn[/{ACCENT}] page  "
             f"[{ACCENT}]/[/{ACCENT}] search  "
-            f"[{ACCENT}]Enter[/{ACCENT}] detail  "
             f"[{ACCENT}]b[/{ACCENT}] browse models  "
             f"[{ACCENT}]m[/{ACCENT}] model ID  "
-            f"[{ACCENT}]f[/{ACCENT}] fit node  "
-            f"[{ACCENT}]s[/{ACCENT}] sort:[{MUTED}]{sort_label}[/{MUTED}]  "
-            f"[{ACCENT}]S[/{ACCENT}] [{MUTED}]{sort_dir}[/{MUTED}]  "
             f"[{ACCENT}]c[/{ACCENT}] [{MUTED}]{cpu_label}[/{MUTED}]  "
             f"[{ACCENT}]t[/{ACCENT}] [{MUTED}]{wt_short}[/{MUTED}]  "
             f"{price_hint}"
@@ -242,7 +231,6 @@ def _render_footer(state: TuiState) -> Text:
         return Text.from_markup(
             f"  [{ACCENT}]j/k[/{ACCENT}] nav  "
             f"[{ACCENT}]PgUp/Dn[/{ACCENT}] page  "
-            f"[{ACCENT}]Enter[/{ACCENT}] detail  "
             f"[{ACCENT}]f[/{ACCENT}] filter:[{MUTED}]{filter_label}[/{MUTED}]  "
             f"[{ACCENT}]w[/{ACCENT}] what-if  "
             f"[{ACCENT}]t[/{ACCENT}] [{MUTED}]{wt_short}[/{MUTED}]  "
@@ -271,12 +259,6 @@ def _render_footer(state: TuiState) -> Text:
         return Text.from_markup(
             f"  [{DIM}]Enter values for Azure pricing setup[/{DIM}]  "
             f"[{ACCENT}]Esc[/{ACCENT}] cancel"
-        )
-
-    if state.view == View.DETAIL:
-        return Text.from_markup(
-            f"  [{ACCENT}]Esc[/{ACCENT}] back  "
-            f"[{ACCENT}]q[/{ACCENT}] quit"
         )
 
     return Text.from_markup(f"  [{ACCENT}]q[/{ACCENT}] quit")
@@ -344,13 +326,12 @@ def _render_inventory_table(state: TuiState, max_rows: int) -> Panel:
         row_styles=[""],  # Uniform, no alternating
     )
 
-    # Columns -- mark sorted column with indicator
-    sort_ind = lambda col: f" {'▼' if not state.sort_ascending else '▲'}" if state.sort_column == col else ""
-    table.add_column(f"Node Type{sort_ind(SortColumn.NAME)}", min_width=26, style=BRIGHT)
-    table.add_column(f"GPUs{sort_ind(SortColumn.GPU_COUNT)}", justify="center", width=5, style=MUTED)
-    table.add_column(f"Family{sort_ind(SortColumn.GPU_FAMILY)}", width=10, style=MUTED)
-    table.add_column(f"GPU Mem{sort_ind(SortColumn.GPU_MEM)}", justify="right", width=9, style=MUTED)
-    table.add_column(f"vCPU{sort_ind(SortColumn.VCPU)}", justify="right", width=5, style=MUTED)
+    # Columns
+    table.add_column("Node Type", min_width=26, style=BRIGHT)
+    table.add_column("GPUs", justify="center", width=5, style=MUTED)
+    table.add_column("Family", width=10, style=MUTED)
+    table.add_column("GPU Mem", justify="right", width=9, style=MUTED)
+    table.add_column("vCPU", justify="right", width=5, style=MUTED)
     table.add_column("RAM", justify="right", width=7, style=DIM)
     table.add_column("DBUs", justify="right", width=7, style=DIM)
     if state.pricing_loaded:
@@ -932,20 +913,6 @@ def _render_candidate_sidebar(candidate: CandidateCompute, state: TuiState) -> P
         border_style=BORDER,
     )
 
-
-# -- Full-screen detail (fallback if accessed directly) ---------------------
-
-
-def _render_detail_panel(state: TuiState) -> Panel:
-    """Full-screen detail view -- used when navigating to DETAIL view directly."""
-    if state.detail_candidate is not None:
-        return _render_candidate_sidebar(state.detail_candidate, state)
-    if state.detail_node is not None:
-        return _render_node_sidebar(state.detail_node, state)
-    return Panel(
-        Text.from_markup(f"  [{DIM}]No item selected[/{DIM}]"),
-        border_style=BORDER,
-    )
 
 # -- Pricing setup wizard view -----------------------------------------------
 

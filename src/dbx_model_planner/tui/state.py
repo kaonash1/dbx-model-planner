@@ -22,7 +22,6 @@ class View(StrEnum):
     MODEL_BROWSE = "model_browse"
     MODEL_INPUT = "model_input"
     MODEL_FIT = "model_fit"
-    DETAIL = "detail"
     WHAT_IF = "what_if"
     PRICING_SETUP = "pricing_setup"
 
@@ -55,33 +54,6 @@ FIT_FILTER_LABELS = {
 }
 
 
-class SortColumn(StrEnum):
-    """Which column the inventory table is sorted by."""
-
-    GPU_MEM = "gpu_mem"
-    GPU_FAMILY = "gpu_family"
-    VCPU = "vcpu"
-    NAME = "name"
-    GPU_COUNT = "gpu_count"
-
-
-SORT_CYCLE = [
-    SortColumn.GPU_MEM,
-    SortColumn.GPU_FAMILY,
-    SortColumn.VCPU,
-    SortColumn.NAME,
-    SortColumn.GPU_COUNT,
-]
-
-SORT_LABELS = {
-    SortColumn.GPU_MEM: "GPU Mem",
-    SortColumn.GPU_FAMILY: "Family",
-    SortColumn.VCPU: "vCPU",
-    SortColumn.NAME: "Name",
-    SortColumn.GPU_COUNT: "GPUs",
-}
-
-
 @dataclass
 class TuiState:
     """Mutable state for the TUI application."""
@@ -109,10 +81,6 @@ class TuiState:
     cpu_nodes: list[WorkspaceComputeProfile] = field(default_factory=list)
     displayed_nodes: list[WorkspaceComputeProfile] = field(default_factory=list)
 
-    # -- Sort -----------------------------------------------------------
-    sort_column: SortColumn = SortColumn.GPU_MEM
-    sort_ascending: bool = False
-
     # -- CPU toggle -----------------------------------------------------
     show_cpu_nodes: bool = False
 
@@ -123,10 +91,6 @@ class TuiState:
     fit_scroll_offset: int = 0
     fit_filter: FitFilter = FitFilter.ALL
     fit_displayed_candidates: list[CandidateCompute] = field(default_factory=list)
-
-    # -- Detail view state ----------------------------------------------
-    detail_node: WorkspaceComputeProfile | None = None
-    detail_candidate: CandidateCompute | None = None
 
     # -- Model history --------------------------------------------------
     model_history: list[str] = field(default_factory=list)
@@ -226,37 +190,8 @@ class TuiState:
         self.displayed_nodes = self._sort_nodes(nodes)
 
     def _sort_nodes(self, nodes: list[WorkspaceComputeProfile]) -> list[WorkspaceComputeProfile]:
-        """Sort nodes by the current sort column."""
-        reverse = not self.sort_ascending
-
-        if self.sort_column == SortColumn.GPU_MEM:
-            return sorted(nodes, key=lambda n: (n.gpu_memory_gb or 0), reverse=reverse)
-        elif self.sort_column == SortColumn.GPU_FAMILY:
-            return sorted(nodes, key=lambda n: (n.gpu_family or "", n.node_type_id), reverse=reverse)
-        elif self.sort_column == SortColumn.VCPU:
-            return sorted(nodes, key=lambda n: (n.vcpu_count or 0), reverse=reverse)
-        elif self.sort_column == SortColumn.NAME:
-            return sorted(nodes, key=lambda n: n.node_type_id, reverse=reverse)
-        elif self.sort_column == SortColumn.GPU_COUNT:
-            return sorted(nodes, key=lambda n: n.gpu_count, reverse=reverse)
-        return nodes
-
-    def cycle_sort(self) -> None:
-        """Cycle to the next sort column, or toggle direction on repeat press."""
-        idx = SORT_CYCLE.index(self.sort_column)
-        next_idx = (idx + 1) % len(SORT_CYCLE)
-        self.sort_column = SORT_CYCLE[next_idx]
-        self.sort_ascending = False
-        self.rebuild_node_lists()
-        self.selected_index = 0
-        self.scroll_offset = 0
-
-    def toggle_sort_direction(self) -> None:
-        """Toggle ascending/descending for the current sort column."""
-        self.sort_ascending = not self.sort_ascending
-        self.rebuild_node_lists()
-        self.selected_index = 0
-        self.scroll_offset = 0
+        """Sort nodes by GPU memory descending (highest VRAM first)."""
+        return sorted(nodes, key=lambda n: (n.gpu_memory_gb or 0), reverse=True)
 
     def toggle_cpu_nodes(self) -> None:
         """Toggle CPU node visibility."""
