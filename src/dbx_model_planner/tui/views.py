@@ -14,7 +14,6 @@ from ..adapters.huggingface.catalog import CatalogEntry
 from ..config import WORKLOAD_LABELS, WorkloadType
 from ..domain import (
     CandidateCompute,
-    DeploymentHint,
     FitLevel,
     ModelFamily,
     WorkspaceComputeProfile,
@@ -247,7 +246,6 @@ def _render_footer(state: TuiState) -> Text:
             f"[{ACCENT}]f[/{ACCENT}] filter:[{MUTED}]{filter_label}[/{MUTED}]  "
             f"[{ACCENT}]w[/{ACCENT}] what-if  "
             f"[{ACCENT}]t[/{ACCENT}] [{MUTED}]{wt_short}[/{MUTED}]  "
-            f"[{ACCENT}]d[/{ACCENT}] deploy  "
             f"[{ACCENT}]m[/{ACCENT}] new model  "
             f"[{ACCENT}]Esc[/{ACCENT}] back  "
             f"[{ACCENT}]q[/{ACCENT}] quit"
@@ -437,10 +435,6 @@ def _render_node_sidebar(node: WorkspaceComputeProfile, state: TuiState) -> Pane
     lines.append(f"  [{MUTED}]vCPU[/{MUTED}]          [{BRIGHT}]{node.vcpu_count or '-'}[/{BRIGHT}]")
     ram = f"{node.memory_gb:.0f} GB" if node.memory_gb else "-"
     lines.append(f"  [{MUTED}]System RAM[/{MUTED}]    [{BRIGHT}]{ram}[/{BRIGHT}]")
-
-    if node.supported_hosting_modes:
-        modes = ", ".join(m.value for m in node.supported_hosting_modes)
-        lines.append(f"  [{MUTED}]Hosting[/{MUTED}]       [{DIM}]{modes}[/{DIM}]")
 
     # Pricing section
     if state.pricing_loaded or node.dbu_per_hour:
@@ -930,18 +924,6 @@ def _render_candidate_sidebar(candidate: CandidateCompute, state: TuiState) -> P
     if state.model_profile is not None:
         lines.append("")
         lines.append(f"  [{DIM}]Press[/{DIM}] [{ACCENT}]w[/{ACCENT}] [{DIM}]for what-if analysis[/{DIM}]")
-
-    # Deployment hint (if generated)
-    if state.deployment_hint is not None:
-        lines.append("")
-        lines.append(f"  [{ACCENT}]Deployment[/{ACCENT}]")
-        lines.append(f"    [{DIM}]{state.deployment_hint.summary}[/{DIM}]")
-        if state.deployment_hint.recommended_node_type_id:
-            lines.append(f"    [{MUTED}]Node:[/{MUTED}] [{BRIGHT}]{state.deployment_hint.recommended_node_type_id}[/{BRIGHT}]")
-        if state.deployment_hint.recommended_runtime_id:
-            lines.append(f"    [{MUTED}]Runtime:[/{MUTED}] [{BRIGHT}]{state.deployment_hint.recommended_runtime_id}[/{BRIGHT}]")
-        if state.deployment_hint.target and state.deployment_hint.target.volume_path:
-            lines.append(f"    [{MUTED}]Volume:[/{MUTED}] [{DIM}]{state.deployment_hint.target.volume_path}[/{DIM}]")
 
     return Panel(
         Text.from_markup("\n".join(lines)),

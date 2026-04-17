@@ -68,26 +68,6 @@ def delete_credential(credential_name: str) -> bool:
         raise KeyringError(f"Failed to delete credential '{credential_name}': {exc}") from exc
 
 
-# Well-known credential names used by this application.
-_KNOWN_CREDENTIAL_NAMES: list[str] = ["databricks", "huggingface"]
-
-
-def list_credentials() -> list[str]:
-    """Return names of credentials that are currently stored in the keyring."""
-    try:
-        _check_keyring_available()
-    except KeyringNotAvailableError:
-        return []
-    found: list[str] = []
-    for name in _KNOWN_CREDENTIAL_NAMES:
-        try:
-            if keyring.get_password(SERVICE_NAME, name) is not None:
-                found.append(name)
-        except Exception:
-            continue
-    return found
-
-
 def credential_exists(credential_name: str) -> bool:
     try:
         return keyring.get_password(SERVICE_NAME, credential_name) is not None

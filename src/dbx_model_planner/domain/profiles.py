@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .common import Cloud, EstimateSource, HostingMode, ModelFamily, ModelModality
+from .common import Cloud, EstimateSource, ModelFamily, ModelModality
 
 
 @dataclass(slots=True)
@@ -33,7 +33,6 @@ class ModelProfile:
     parameter_count: int | None = None
     active_parameter_count: int | None = None
     context_length: int | None = None
-    max_batch_size_hint: int | None = None
     architecture: str | None = None
     # Architecture details for precise KV cache estimation (from config.json).
     num_hidden_layers: int | None = None
@@ -53,12 +52,6 @@ class WorkloadProfile:
     workload_name: str
     online: bool = True
     expected_qps: float | None = None
-    target_latency_ms: int | None = None
-    target_concurrency: int | None = None
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-    input_sequence_length: int | None = None
-    scale_to_zero_tolerated: bool = False
 
 
 @dataclass(slots=True)
@@ -104,8 +97,6 @@ class WorkspaceComputeProfile:
     local_disk_gb: float | None = None
     dbu_per_hour: float | None = None  # Estimated DBUs consumed per hour
     runtime_ids: list[str] = field(default_factory=list)
-    supported_hosting_modes: list[HostingMode] = field(default_factory=list)
-    policy_ids: list[str] = field(default_factory=list)
     availability_notes: list[str] = field(default_factory=list)
     attributes: dict[str, str] = field(default_factory=dict)
     availability_source: EstimateSource = EstimateSource.DISCOVERED
@@ -123,17 +114,6 @@ class CostProfile:
     vat_adjusted_hourly_rate: float | None = None
     pricing_reference: str | None = None
     source: EstimateSource = EstimateSource.INFERRED
-
-
-@dataclass(slots=True)
-class DeploymentTarget:
-    """Storage and governance target for a deployment plan."""
-
-    catalog: str | None = None
-    schema: str | None = None
-    volume: str | None = None
-    volume_path: str | None = None
-    unity_catalog_enabled: bool = True
 
 
 @dataclass(slots=True)

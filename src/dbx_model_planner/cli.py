@@ -7,7 +7,7 @@ from typing import Any
 import typer
 from rich.console import Console
 
-from dbx_model_planner.adapters.azure import build_azure_cost_profile, enrich_azure_compute
+from dbx_model_planner.adapters.azure import enrich_azure_compute
 from dbx_model_planner.adapters.huggingface import (
     GatedRepoError,
     HuggingFaceAPIError,
@@ -26,15 +26,13 @@ from dbx_model_planner.collectors.databricks.inventory import enrich_dbu_rates
 from dbx_model_planner.adapters.azure.dbu_rates import (
     build_dbu_rate_cache,
     fetch_dbu_rates,
-    fetch_dbu_unit_prices,
     load_dbu_cache,
     save_dbu_cache,
 )
 from dbx_model_planner.config import AppConfig, load_app_config
-from dbx_model_planner.domain import WorkloadProfile, WorkspaceComputeProfile, WorkspaceInventorySnapshot
-from dbx_model_planner.planners import build_deployment_hint, recommend_compute_for_model
+from dbx_model_planner.domain import WorkloadProfile, WorkspaceInventorySnapshot
+from dbx_model_planner.planners import recommend_compute_for_model
 from dbx_model_planner.presentation import (
-    render_deployment_hint,
     render_inventory,
     render_json,
     render_model_recommendation,
@@ -53,14 +51,10 @@ app = typer.Typer(
 auth_app = typer.Typer(help="Manage credentials stored in system keyring.")
 inventory_app = typer.Typer(help="Sync or inspect Databricks inventory.")
 model_app = typer.Typer(help="Run model-first planning commands.")
-price_app = typer.Typer(help="Estimate cost for a compute profile.")
-deploy_app = typer.Typer(help="Generate a minimal deployment hint.")
 
 app.add_typer(auth_app, name="auth")
 app.add_typer(inventory_app, name="inventory")
 app.add_typer(model_app, name="model")
-app.add_typer(price_app, name="price")
-app.add_typer(deploy_app, name="deploy")
 
 
 ConfigPathOption = typer.Option(None, "--config-path", help="Optional config TOML path.")
@@ -162,9 +156,6 @@ def model_fit(
     config_path: Path | None = ConfigPathOption,
     data_dir: Path | None = DataDirOption,
     json_output: bool = JsonOption,
-    batch: bool = typer.Option(False, "--batch", help="Plan for batch compute instead of online inference."),
-    expected_qps: float | None = typer.Option(None, "--expected-qps", help="Optional QPS hint."),
-    target_concurrency: int | None = typer.Option(None, "--target-concurrency", help="Optional concurrency hint."),
     azure_pricing: bool = typer.Option(False, "--azure-pricing", help="Try public Azure Retail Prices lookup."),
 ) -> None:
     """Show candidate compute for a HuggingFace model."""
@@ -174,12 +165,7 @@ def model_fit(
     normalized = _fetch_model(model_ref)
     model = normalized.model_profile
 
-    workload = WorkloadProfile(
-        workload_name="model-fit",
-        online=not batch,
-        expected_qps=expected_qps,
-        target_concurrency=target_concurrency,
-    )
+    workload = WorkloadProfile(workload_name="model-fit")
 
     vm_pricing = {}
     if azure_pricing:
@@ -198,87 +184,6 @@ def model_fit(
         console.print(render_json({"model": normalized, "recommendation": recommendation}))
     else:
         console.print(render_model_recommendation(recommendation))
-
-
-# -- Price -------------------------------------------------------------------
-
-
-@price_app.command("estimate")
-def price_estimate(
-    node_type: str = typer.Argument(..., help="Databricks node type id."),
-    vm_rate: float | None = typer.Option(None, "--vm-rate", help="Explicit VM hourly rate override."),
-    dbu_rate: float | None = typer.Option(None, "--dbu-rate", help="Explicit DBU hourly rate override."),
-    azure_pricing: bool = typer.Option(False, "--azure-pricing", help="Try public Azure Retail Prices lookup."),
-    config_path: Path | None = ConfigPathOption,
-    data_dir: Path | None = DataDirOption,
-    json_output: bool = JsonOption,
-) -> None:
-    """Estimate price from Azure or explicit rates."""
-
-    config, store = _load_runtime(config_path=config_path, data_dir=data_dir)
-    snapshot = _load_inventory(store)
-    compute = _resolve_compute(snapshot, node_type)
-
-    if azure_pricing:
-        enrichment = enrich_azure_compute(
-            compute,
-            dbu_hourly_rate=dbu_rate if dbu_rate is not None else None,
-            discount_rate=config.pricing.discount_rate,
-            vat_rate=config.pricing.vat_rate,
-            currency_code=config.pricing.currency_code,
-        )
-        console.print(render_json(enrichment))
-        return
-
-    if vm_rate is None:
-        raise typer.BadParameter("Provide --vm-rate or enable --azure-pricing for a price estimate.")
-
-    cost = build_azure_cost_profile(
-        vm_hourly_rate=vm_rate,
-        dbu_hourly_rate=dbu_rate if dbu_rate is not None else None,
-        discount_rate=config.pricing.discount_rate,
-        vat_rate=config.pricing.vat_rate,
-        currency_code=config.pricing.currency_code,
-    )
-    console.print(render_json({"node_type_id": compute.node_type_id, "cost": cost}))
-
-
-# -- Deploy ------------------------------------------------------------------
-
-
-@deploy_app.command("plan")
-def deploy_plan(
-    model_ref: str = typer.Argument(..., help="HuggingFace repository ID."),
-    config_path: Path | None = ConfigPathOption,
-    data_dir: Path | None = DataDirOption,
-    json_output: bool = JsonOption,
-    azure_pricing: bool = typer.Option(False, "--azure-pricing", help="Try public Azure Retail Prices lookup."),
-) -> None:
-    """Build a UC volume and cluster hint for a HuggingFace model."""
-
-    config, store = _load_runtime(config_path=config_path, data_dir=data_dir)
-    snapshot = _load_inventory(store)
-    normalized = _fetch_model(model_ref)
-    model = normalized.model_profile
-
-    vm_pricing = {}
-    if azure_pricing:
-        vm_pricing, _ = _azure_vm_pricing_map(config, snapshot)
-
-    recommendation = recommend_compute_for_model(
-        config=config,
-        inventory=snapshot,
-        model=model,
-        workload=WorkloadProfile(workload_name="deploy-plan", online=True),
-        vm_pricing=vm_pricing,
-        dbu_pricing=_dbu_pricing_map(config, snapshot),
-    )
-    hint = build_deployment_hint(config, snapshot, model, recommendation)
-
-    if json_output:
-        console.print(render_json({"recommendation": recommendation, "hint": hint}))
-    else:
-        console.print(render_deployment_hint(hint))
 
 
 # -- Helpers -----------------------------------------------------------------
@@ -349,13 +254,6 @@ def _fetch_model(model_ref: str):
     except HuggingFaceAPIError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1)
-
-
-def _resolve_compute(snapshot: WorkspaceInventorySnapshot, node_type: str) -> WorkspaceComputeProfile:
-    for compute in snapshot.compute:
-        if compute.node_type_id == node_type:
-            return compute
-    return WorkspaceComputeProfile(node_type_id=node_type, region=snapshot.region)
 
 
 def _dbu_pricing_map(config: AppConfig, snapshot: WorkspaceInventorySnapshot) -> dict[str, float]:

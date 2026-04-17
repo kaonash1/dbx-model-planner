@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from ..domain.common import Cloud, EstimateSource, HostingMode, ModelFamily, ModelModality
+from ..domain.common import Cloud, EstimateSource, ModelFamily, ModelModality
 from ..domain.profiles import (
     ModelArtifactProfile,
     ModelProfile,
@@ -264,8 +264,6 @@ def _workspace_compute_profile_to_payload(profile: WorkspaceComputeProfile) -> d
         "memory_gb": profile.memory_gb,
         "local_disk_gb": profile.local_disk_gb,
         "runtime_ids": list(profile.runtime_ids),
-        "supported_hosting_modes": [mode.value for mode in profile.supported_hosting_modes],
-        "policy_ids": list(profile.policy_ids),
         "availability_notes": list(profile.availability_notes),
         "attributes": dict(profile.attributes),
         "availability_source": profile.availability_source.value,
@@ -285,10 +283,6 @@ def _workspace_compute_profile_from_payload(payload: Mapping[str, Any]) -> Works
         memory_gb=_optional_float(payload.get("memory_gb")),
         local_disk_gb=_optional_float(payload.get("local_disk_gb")),
         runtime_ids=[str(item) for item in payload.get("runtime_ids", [])],
-        supported_hosting_modes=[
-            HostingMode(str(item)) for item in payload.get("supported_hosting_modes", [])
-        ],
-        policy_ids=[str(item) for item in payload.get("policy_ids", [])],
         availability_notes=[str(item) for item in payload.get("availability_notes", [])],
         attributes={str(key): str(value) for key, value in dict(payload.get("attributes", {})).items()},
         availability_source=EstimateSource(str(payload.get("availability_source", EstimateSource.DISCOVERED))),
@@ -356,8 +350,10 @@ def _model_snapshot_to_payload(model: ModelProfile) -> dict[str, Any]:
         "parameter_count": model.parameter_count,
         "active_parameter_count": model.active_parameter_count,
         "context_length": model.context_length,
-        "max_batch_size_hint": model.max_batch_size_hint,
         "architecture": model.architecture,
+        "num_hidden_layers": model.num_hidden_layers,
+        "num_kv_heads": model.num_kv_heads,
+        "head_dim": model.head_dim,
         "dtype_options": list(model.dtype_options),
         "quantization_options": list(model.quantization_options),
         "capabilities": list(model.capabilities),
@@ -376,8 +372,10 @@ def _model_snapshot_from_payload(payload: Mapping[str, Any]) -> ModelProfile:
         parameter_count=_optional_int(payload.get("parameter_count")),
         active_parameter_count=_optional_int(payload.get("active_parameter_count")),
         context_length=_optional_int(payload.get("context_length")),
-        max_batch_size_hint=_optional_int(payload.get("max_batch_size_hint")),
         architecture=_optional_str(payload.get("architecture")),
+        num_hidden_layers=_optional_int(payload.get("num_hidden_layers")),
+        num_kv_heads=_optional_int(payload.get("num_kv_heads")),
+        head_dim=_optional_int(payload.get("head_dim")),
         dtype_options=[str(item) for item in payload.get("dtype_options", [])],
         quantization_options=[str(item) for item in payload.get("quantization_options", [])],
         capabilities=[str(item) for item in payload.get("capabilities", [])],

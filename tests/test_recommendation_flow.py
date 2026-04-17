@@ -6,7 +6,6 @@ import unittest
 from dbx_model_planner.config import AppConfig
 from dbx_model_planner.domain import (
     Cloud,
-    HostingMode,
     ModelFamily,
     ModelModality,
     ModelProfile,
@@ -16,8 +15,8 @@ from dbx_model_planner.domain import (
     WorkspaceInventorySnapshot,
     WorkspacePolicyProfile,
 )
-from dbx_model_planner.planners import build_deployment_hint, recommend_compute_for_model, recommend_models_for_compute
-from dbx_model_planner.presentation import render_compute_fit, render_deployment_hint, render_inventory, render_model_recommendation
+from dbx_model_planner.planners import recommend_compute_for_model, recommend_models_for_compute
+from dbx_model_planner.presentation import render_compute_fit, render_inventory, render_model_recommendation
 from dbx_model_planner.runtime import build_runtime_context
 from dbx_model_planner.storage import SQLiteSnapshotStore
 
@@ -34,7 +33,6 @@ def _mock_inventory() -> WorkspaceInventorySnapshot:
                 cloud=Cloud.AZURE,
                 region="eastus2",
                 gpu_count=0,
-                supported_hosting_modes=[HostingMode.CLASSIC_COMPUTE, HostingMode.BATCH_COMPUTE],
             ),
             WorkspaceComputeProfile(
                 node_type_id="Standard_NC6s_v3",
@@ -43,7 +41,6 @@ def _mock_inventory() -> WorkspaceInventorySnapshot:
                 gpu_family="V100",
                 gpu_count=1,
                 gpu_memory_gb=16.0,
-                supported_hosting_modes=[HostingMode.CLASSIC_COMPUTE],
             ),
         ],
         runtimes=[
@@ -128,26 +125,6 @@ class RecommendationFlowTests(unittest.TestCase):
 
         self.assertIn("embedding", report.model_family_ranges)
         self.assertIn("Compute Standard_NC6s_v3", report.summary)
-
-    def test_deployment_hint_uses_catalog_defaults(self) -> None:
-        config = AppConfig()
-        config.catalog.catalog = "main"
-        config.catalog.schema = "serving"
-        config.catalog.volume = "artifacts"
-        snapshot = _mock_inventory()
-        model = _mock_vlm()
-        recommendation = recommend_compute_for_model(
-            config=config,
-            inventory=snapshot,
-            model=model,
-            workload=WorkloadProfile(workload_name="deploy", online=True),
-        )
-
-        hint = build_deployment_hint(config, snapshot, model, recommendation)
-
-        self.assertEqual(hint.recommended_node_type_id, "Standard_NC6s_v3")
-        self.assertTrue(hint.target)
-        self.assertIn("Volume path:", render_deployment_hint(hint))
 
     def test_runtime_context_and_snapshot_store_work_with_inventory(self) -> None:
         with TemporaryDirectory() as tmp_dir:

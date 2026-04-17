@@ -214,7 +214,6 @@ def _build_model_profile(
         or config.get("max_seq_len")
         or config.get("seq_length")
     )
-    max_batch_size_hint = _as_int(config.get("max_batch_size") or config.get("batch_size"))
     architecture = _first_text(config.get("architectures")) or _as_optional_text(config.get("model_type"))
 
     # Architecture details for precise KV cache estimation.
@@ -271,7 +270,6 @@ def _build_model_profile(
         parameter_count=parameter_count,
         active_parameter_count=active_parameter_count,
         context_length=context_length,
-        max_batch_size_hint=max_batch_size_hint,
         architecture=architecture,
         num_hidden_layers=num_hidden_layers,
         num_kv_heads=num_kv_heads,

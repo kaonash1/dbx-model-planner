@@ -7,7 +7,6 @@ from enum import StrEnum
 from ..adapters.huggingface.catalog import CatalogEntry
 from ..domain import (
     CandidateCompute,
-    DeploymentHint,
     FitLevel,
     HostingRecommendation,
     ModelProfile,
@@ -128,9 +127,6 @@ class TuiState:
     # -- Detail view state ----------------------------------------------
     detail_node: WorkspaceComputeProfile | None = None
     detail_candidate: CandidateCompute | None = None
-
-    # -- Deployment hint ------------------------------------------------
-    deployment_hint: DeploymentHint | None = None
 
     # -- Model history --------------------------------------------------
     model_history: list[str] = field(default_factory=list)

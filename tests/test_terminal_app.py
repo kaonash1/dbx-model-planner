@@ -8,7 +8,6 @@ from dbx_model_planner.collectors.databricks import DatabricksInventoryCollectio
 from dbx_model_planner.config import AppConfig
 from dbx_model_planner.domain import (
     Cloud,
-    HostingMode,
     RuntimeProfile,
     WorkspaceComputeProfile,
     WorkspaceInventorySnapshot,
@@ -36,7 +35,6 @@ def _mock_inventory() -> WorkspaceInventorySnapshot:
                 cloud=Cloud.AZURE,
                 region="eastus2",
                 gpu_count=0,
-                supported_hosting_modes=[HostingMode.CLASSIC_COMPUTE, HostingMode.BATCH_COMPUTE],
             ),
             WorkspaceComputeProfile(
                 node_type_id="Standard_NC6s_v3",
@@ -45,7 +43,6 @@ def _mock_inventory() -> WorkspaceInventorySnapshot:
                 gpu_family="V100",
                 gpu_count=1,
                 gpu_memory_gb=16.0,
-                supported_hosting_modes=[HostingMode.CLASSIC_COMPUTE],
             ),
         ],
         runtimes=[

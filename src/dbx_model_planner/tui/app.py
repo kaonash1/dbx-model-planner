@@ -41,7 +41,6 @@ from ..collectors.databricks.inventory import enrich_dbu_rates
 from ..config import AppConfig, WorkloadType, WORKLOAD_DBU_PRESETS, WORKLOAD_LABELS, _WORKLOAD_CYCLE
 from ..domain import ModelFamily, WorkloadProfile
 from ..planners import recommend_compute_for_model
-from ..planners.deployment import build_deployment_hint
 from .keys import (
     KEY_BACKSPACE,
     KEY_DOWN,
@@ -586,16 +585,14 @@ def _handle_normal_input(
                 state.view = View.MODEL_INPUT
                 state.input_mode = InputMode.MODEL_ID
                 state.input_buffer = ""
-                state.status_message = f"Fit model against {node.node_type_id}"
+                state.status_message = ""
         elif state.view == View.MODEL_FIT:
             state.cycle_fit_filter()
         return
 
-    # -- Deployment hint from model fit / Discover in browse -------------
+    # -- Discover in browse -------------------------------------------------
     if key in ("d", "D"):
-        if state.view == View.MODEL_FIT:
-            _generate_deployment_hint(state, config)
-        elif state.view == View.MODEL_BROWSE:
+        if state.view == View.MODEL_BROWSE:
             _discover_trending(state, hf_creds, live, console)
         return
 
@@ -812,7 +809,6 @@ def _fetch_model_threaded(
 
     state.model_profile = model
     state.model_recommendation = recommendation
-    state.deployment_hint = None
     state.fit_filter = FitFilter.ALL
     state.fit_selected_index = 0
     state.fit_scroll_offset = 0
@@ -822,26 +818,6 @@ def _fetch_model_threaded(
 
     # Add to history
     state.add_model_to_history(model_id)
-
-
-def _generate_deployment_hint(state: TuiState, config: AppConfig) -> None:
-    """Generate a deployment hint for the current model/recommendation."""
-    if (
-        state.model_profile is None
-        or state.model_recommendation is None
-        or state.inventory is None
-    ):
-        state.status_message = "No model loaded"
-        return
-
-    hint = build_deployment_hint(
-        config=config,
-        inventory=state.inventory,
-        model=state.model_profile,
-        recommendation=state.model_recommendation,
-    )
-    state.deployment_hint = hint
-    state.status_message = "Deployment hint generated"
 
 
 def _go_back(state: TuiState) -> None:

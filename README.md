@@ -1,130 +1,118 @@
 # dbx-model-planner
 
-`dbx-model-planner` is a workspace-aware planner for running open and hosted models on Azure Databricks.
+A workspace-aware planner for sizing and costing open models on Azure Databricks. Connects live to your Databricks workspace and HuggingFace, estimates GPU memory requirements, and helps you pick the right compute — with real Azure pricing.
 
-The project is intentionally broader than LLMs. The target scope includes:
+## Features
 
-- text generation models
-- embedding models
-- rerankers
-- vision-language models
-
-The core question is the same across all of them:
-
-- what model do I have
-- what compute do I have
-- what runtime and configuration do I need
-- what will it cost
-- what is the shortest safe path to running it on Databricks
-
-## How it works
-
-The planner connects **live** to your Databricks workspace and HuggingFace to:
-
-1. Fetch available node types, runtimes, and cluster policies from your workspace
-2. Fetch model metadata (parameter count, architecture, context length) from HuggingFace
-3. Estimate GPU memory requirements and rank candidate compute profiles
-4. Generate deployment hints with Unity Catalog volume paths and cluster config
-
-Credentials are stored securely in the system keyring (Windows Credential Manager, macOS Keychain, or libsecret on Linux).
+- **Live workspace inventory** — fetches available node types, GPU specs, runtimes, and cluster policies directly from your Databricks workspace
+- **Model fit analysis** — estimates VRAM requirements for any HuggingFace model and ranks workspace compute by fit level (safe / borderline / unlikely)
+- **Architecture-aware estimation** — uses model metadata (KV heads, head dimension, layer count) for precise KV cache sizing, with quantization and context length support
+- **Azure pricing integration** — fetches VM prices from the Azure Retail Prices API, applies DBU rates, enterprise discounts, and VAT for realistic $/hr estimates
+- **What-if analysis** — explore how quantization (fp16, int8, int4, etc.) and context length affect fit and cost across all GPU nodes
+- **Interactive TUI** — full-screen terminal interface built with Rich, with keyboard navigation, model browsing, and a pricing setup wizard
+- **Supports LLMs, embeddings, and VLMs** — the planning engine handles text generation, embedding, vision-language, and code models with family-specific heuristics
 
 ## Getting started
 
-### First-time setup
+### Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- A Databricks workspace with API access
+- A HuggingFace account (optional, needed for gated models)
+
+### Install
 
 ```bash
-uv run python -m dbx_model_planner auth login
+git clone https://github.com/kaonash1/dbx-model-planner.git
+cd dbx-model-planner
+uv sync
 ```
 
-This will prompt for:
-- **Databricks workspace URL** (e.g., `https://adb-1234567890123456.7.azuredatabricks.net`)
-- **Databricks API token** (generate at: Workspace > Settings > Developer > Access tokens)
-- **HuggingFace token** (optional, needed for gated models like Llama, Mistral)
-
-Credentials are validated on entry and stored in the system keyring.
-
-### Interactive terminal planner
+### Set up credentials
 
 ```bash
-uv run python -m dbx_model_planner app
+uv run dbx-model-planner auth login
 ```
 
-The `app` command syncs live inventory from Databricks, then presents an interactive menu:
-1. Show workspace inventory (node types, runtimes, policies)
-2. Model -> compute fit (enter a HuggingFace model ID, get ranked compute candidates)
-3. Deployment hint (UC volume path, cluster config suggestion)
+This prompts for your Databricks workspace URL, API token, and (optionally) a HuggingFace token. Credentials are stored in the system keyring (Windows Credential Manager, macOS Keychain, or libsecret on Linux) — never written to files.
+
+### Launch the interactive planner
+
+```bash
+uv run dbx-model-planner app
+```
+
+This opens the full-screen TUI. Use `--classic` for a simpler text-based menu instead:
+
+```bash
+uv run dbx-model-planner app --classic
+```
 
 ### CLI commands
 
 ```bash
 # Auth
-uv run python -m dbx_model_planner auth login      # Configure credentials
-uv run python -m dbx_model_planner auth logout     # Remove stored credentials
-uv run python -m dbx_model_planner auth status     # Show credential status
+uv run dbx-model-planner auth login       # Configure credentials
+uv run dbx-model-planner auth logout      # Remove stored credentials
+uv run dbx-model-planner auth status      # Show credential status
+
+# Interactive planner
+uv run dbx-model-planner app              # Full-screen TUI (default)
+uv run dbx-model-planner app --classic    # Text-based menu
 
 # Inventory
-uv run python -m dbx_model_planner inventory sync  # Sync and cache workspace inventory
+uv run dbx-model-planner inventory sync   # Sync and cache workspace inventory
 
 # Model planning
-uv run python -m dbx_model_planner model fit meta-llama/Llama-3.1-8B-Instruct
-uv run python -m dbx_model_planner model fit mistralai/Mistral-7B-Instruct-v0.3 --batch
-uv run python -m dbx_model_planner model fit meta-llama/Llama-3.1-8B-Instruct --azure-pricing
-
-# Pricing
-uv run python -m dbx_model_planner price estimate Standard_NC6s_v3 --vm-rate 3.25 --dbu-rate 0.75
-uv run python -m dbx_model_planner price estimate Standard_NC6s_v3 --azure-pricing
-
-# Deployment hints
-uv run python -m dbx_model_planner deploy plan meta-llama/Llama-3.1-8B-Instruct
+uv run dbx-model-planner model fit meta-llama/Llama-3.1-8B-Instruct
+uv run dbx-model-planner model fit meta-llama/Llama-3.1-70B-Instruct --azure-pricing
 ```
 
 Most commands support `--json` for machine-readable output.
 
-## Scope
+## How estimation works
 
-The first version is a planner and advisor, not a full orchestrator.
+The fit engine estimates total GPU memory as three components:
 
-It should answer:
+```
+total = model_weights + kv_cache + runtime_overhead
+```
 
-- which workspace GPU computes are available right now
-- which DBR versions and policies constrain the choice
-- whether a given model is likely to fit on a given compute
-- which precision or quantization is realistic
-- what the estimated cost is after company pricing rules
-- what the recommended deployment path is
+**Model weights** are computed from parameter count and quantization. Each quantization level has a bytes-per-parameter (BPP) value — for example, fp16 = 2.0 bytes, Q8_0 = 1.05, Q4_0 = 0.55.
 
-It should not initially promise:
+**KV cache** is estimated using model architecture metadata from HuggingFace (number of KV heads, head dimension, layer count) when available. For GQA models like Llama 3, this produces accurate estimates that are much lower than naive parameter-scaled heuristics. When architecture metadata is missing, a parameter-scaled fallback is used.
 
-- perfect memory prediction
-- automatic support for every quantization stack
-- one-click production deployment for every model family
+**Runtime overhead** is a conservative fixed estimate that accounts for Databricks serving framework overhead (1.5 GB for LLMs, 2.0 GB for VLMs, 0.6 GB for embeddings).
 
-## Why the scope can include LLMs, embeddings, and VLMs
+A model "fits" a node when the total estimate leaves at least 15% headroom on the node's total GPU memory (per-GPU memory multiplied by GPU count for multi-GPU nodes).
 
-These families differ in serving patterns, but they can still share the same planning model:
+**Pricing** combines the Azure VM list price with Databricks DBU charges, then applies enterprise discount and VAT to the total:
 
-- model profile: task, modality, parameter count, artifact size, context constraints
-- runtime profile: framework, dtype, quantization, dependencies
-- compute profile: GPU count, GPU memory, CPU memory, local disk, DBR compatibility
-- cost profile: VM rate, DBU rate, company adjustments
+```
+hourly_cost = (vm_price + dbu_count * dbu_rate) * (1 - discount) * (1 + vat)
+```
 
-The planning engine then applies family-specific heuristics where needed.
+## Development
+
+```bash
+uv run pytest tests/ -q          # Run tests
+uv run dbx-model-planner --help  # Show all commands
+```
 
 ## Docs
 
-- [MVP Spec](./docs/mvp-spec.md)
-- [Decision Framework](./docs/decision-framework.md)
-- [llmfit Analysis](./docs/llmfit-analysis.md)
-- [Domain Model](./docs/domain-model.md)
-- [Development Backlog](./docs/development-backlog.md)
 - [Architecture](./docs/architecture.md)
-- [Agent Handoff](./docs/agent-handoff.md)
+- [Decision Framework](./docs/decision-framework.md)
+- [Domain Model](./docs/domain-model.md)
+- [llmfit Analysis](./docs/llmfit-analysis.md)
 
-## Local development
+## License
 
-```bash
-uv run python -m dbx_model_planner --help
-uv run python -m unittest discover -s tests -p 'test_*.py'
-```
+This project is licensed under the [GNU General Public License v3.0](./LICENSE).
 
-If the default user data directory is not writable, the CLI falls back to a temp directory for local snapshots. You can also pass `--data-dir`.
+## Acknowledgments
+
+The estimation engine draws on ideas from [llmfit](https://github.com/AlexsJones/llmfit) by Alex Jones — particularly quantization-aware memory modeling, KV cache formulas, and TUI design patterns. See [llmfit Analysis](./docs/llmfit-analysis.md) for a detailed comparison.
+
+Built with assistance from Claude by [Anthropic](https://anthropic.com).

@@ -14,8 +14,8 @@ from .auth import (
 from .collectors.databricks import DatabricksAPIError, DatabricksInventoryCollector
 from .config import AppConfig
 from .domain import WorkloadProfile, WorkspaceInventorySnapshot
-from .planners import build_deployment_hint, recommend_compute_for_model
-from .presentation import render_deployment_hint, render_inventory, render_model_recommendation
+from .planners import recommend_compute_for_model
+from .presentation import render_inventory, render_model_recommendation
 
 
 InputFn = Callable[[str], str]
@@ -66,7 +66,6 @@ def run_terminal_app(
         output_fn("Choose an action:")
         output_fn("  1. Show workspace inventory")
         output_fn("  2. Model -> compute fit")
-        output_fn("  3. Deployment hint")
         output_fn("  q. Quit")
         choice = input_fn("> ").strip().lower()
 
@@ -77,10 +76,8 @@ def run_terminal_app(
             _action_show_inventory(inventory, output_fn)
         elif choice == "2":
             _action_model_fit(config, inventory, hf_creds, input_fn, output_fn)
-        elif choice == "3":
-            _action_deployment_hint(config, inventory, hf_creds, input_fn, output_fn)
         else:
-            output_fn("Unknown choice. Enter 1, 2, 3, or q.")
+            output_fn("Unknown choice. Enter 1, 2, or q.")
             output_fn("")
 
 
@@ -143,33 +140,6 @@ def _action_model_fit(
     )
     output_fn("")
     output_fn(render_model_recommendation(recommendation))
-    output_fn("")
-
-
-def _action_deployment_hint(
-    config: AppConfig,
-    inventory: WorkspaceInventorySnapshot,
-    hf_creds: HuggingFaceCredentials | None,
-    input_fn: InputFn,
-    output_fn: OutputFn,
-) -> None:
-    repo_id = _prompt_model_ref(input_fn, output_fn)
-    if repo_id is None:
-        return
-
-    model = _fetch_and_normalize_model(repo_id, hf_creds, output_fn)
-    if model is None:
-        return
-
-    recommendation = recommend_compute_for_model(
-        config=config,
-        inventory=inventory,
-        model=model,
-        workload=WorkloadProfile(workload_name="deploy", online=True),
-    )
-    hint = build_deployment_hint(config, inventory, model, recommendation)
-    output_fn("")
-    output_fn(render_deployment_hint(hint))
     output_fn("")
 
 

@@ -22,3 +22,6 @@ htmlcov/
 docs/agent-handoff.md
 docs/development-backlog.md
 docs/mvp-spec.md
+
+# Debug scripts
+_debug_*.py

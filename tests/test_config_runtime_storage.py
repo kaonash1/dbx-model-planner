@@ -13,7 +13,7 @@ from dbx_model_planner.config import (
     load_app_config,
     render_default_config_template,
 )
-from dbx_model_planner.domain.common import Cloud, EstimateSource, HostingMode, ModelFamily, ModelModality
+from dbx_model_planner.domain.common import Cloud, EstimateSource, ModelFamily, ModelModality
 from dbx_model_planner.domain.profiles import (
     ModelArtifactProfile,
     ModelProfile,
@@ -100,8 +100,6 @@ class ConfigRuntimeStorageTests(unittest.TestCase):
                         gpu_family="nvidia",
                         gpu_count=1,
                         runtime_ids=["15.4"],
-                        supported_hosting_modes=[HostingMode.CLASSIC_COMPUTE],
-                        policy_ids=["policy-1"],
                         availability_source=EstimateSource.DISCOVERED,
                     )
                 ],

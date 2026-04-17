@@ -89,12 +89,6 @@ class MemoryEstimate:
 
 
 def _family_default_quantization(model: ModelProfile) -> str:
-    if model.family == ModelFamily.LLM:
-        return "fp16"
-    if model.family in {ModelFamily.EMBEDDING, ModelFamily.RERANKER}:
-        return "fp16"
-    if model.family == ModelFamily.VLM:
-        return "fp16"
     return "fp16"
 
 
