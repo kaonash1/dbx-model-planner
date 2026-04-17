@@ -55,6 +55,7 @@ from .keys import (
     KEY_TAB,
     KEY_UP,
     read_key,
+    read_key_nonblocking,
 )
 from .state import FitFilter, InputMode, TuiState, View
 from .views import build_layout
@@ -91,6 +92,27 @@ def _save_model_history(history: list[str]) -> None:
 # -- Entry point ------------------------------------------------------------
 
 
+def _wait_for_thread(
+    thread: threading.Thread,
+    state: TuiState,
+    live: Live,
+    console: Console,
+) -> bool:
+    """Wait for a background thread while keeping the UI responsive.
+
+    Polls for keypresses so the user can press ``q`` to quit even during
+    long network operations.  Returns ``True`` if the thread completed
+    normally, ``False`` if the user requested quit.
+    """
+    while thread.is_alive():
+        key = read_key_nonblocking(0.15)
+        if key in ("q", "Q"):
+            state.should_quit = True
+            return False
+        live.update(build_layout(state, console.height))
+    return True
+
+
 def run_tui(*, config: AppConfig) -> int:
     """Run the interactive TUI application.
 
@@ -106,17 +128,24 @@ def run_tui(*, config: AppConfig) -> int:
     console.print("[bold]dbx-model-planner[/bold]")
     console.print()
 
-    dbx_creds, hf_creds = _load_credentials(console)
+    dbx_creds, hf_creds, azure_region = _load_credentials(console)
     if dbx_creds is None:
         console.print("[red]Cannot continue without Databricks credentials.[/red]")
         return 1
+
+    # Apply stored region to config (credential region takes precedence
+    # over config file, but env var / config file can still override).
+    if azure_region and not config.pricing.azure_region:
+        config.pricing.azure_region = azure_region
 
     # -- Step 2: Live inventory sync (pre-TUI, normal terminal) --------
     console.print()
     console.print("Syncing workspace inventory...")
     try:
         collector = DatabricksInventoryCollector(credentials=dbx_creds)
-        collection = collector.collect()
+        collection = collector.collect(
+            progress_fn=lambda msg: console.print(f"  {msg}"),
+        )
         for note in collection.notes:
             console.print(f"  {note}")
     except DatabricksAPIError as exc:
@@ -140,7 +169,7 @@ def run_tui(*, config: AppConfig) -> int:
     _load_dbu_rates(state, config, console)
 
     # -- Step 3b: Try to load cached prices ----------------------------
-    if config.pricing.auto_fetch_pricing:
+    if config.pricing.auto_fetch_pricing and config.pricing.azure_region:
         _try_load_cached_prices(state, config)
 
     console.print()
@@ -149,6 +178,8 @@ def run_tui(*, config: AppConfig) -> int:
     console.print(f"Loaded {len(state.gpu_nodes)} GPU nodes, {len(state.cpu_nodes)} CPU nodes{dbu_msg}.")
     if state.pricing_loaded:
         console.print(f"Loaded {state.pricing_node_count} cached prices ({state.pricing_region}).")
+    if not config.pricing.azure_region:
+        console.print("[yellow]No Azure region configured. Press $ in TUI to set up pricing.[/yellow]")
     console.print("Launching TUI... (press [bold]q[/bold] to quit)")
     console.print()
 
@@ -164,14 +195,16 @@ def run_tui(*, config: AppConfig) -> int:
     return 0
 
 
-def _load_credentials(console: Console) -> tuple[DatabricksCredentials | None, HuggingFaceCredentials | None]:
+def _load_credentials(console: Console) -> tuple[DatabricksCredentials | None, HuggingFaceCredentials | None, str | None]:
     """Load stored credentials or run the wizard."""
     if credential_exists("databricks"):
         try:
-            dbx_creds, hf_creds = load_stored_credentials()
+            dbx_creds, hf_creds, azure_region = load_stored_credentials()
             if dbx_creds:
                 console.print(f"Loaded credentials: {dbx_creds.host}")
-                return dbx_creds, hf_creds
+                if azure_region:
+                    console.print(f"Azure region: {azure_region}")
+                return dbx_creds, hf_creds, azure_region
         except KeyringNotAvailableError:
             console.print("[yellow]System keyring unavailable.[/yellow]")
 
@@ -180,7 +213,7 @@ def _load_credentials(console: Console) -> tuple[DatabricksCredentials | None, H
         return run_auth_wizard(input_fn=input, output_fn=console.print)
     except KeyringNotAvailableError as exc:
         console.print(f"[red]Error:[/red] {exc}")
-        return None, None
+        return None, None, None
 
 
 def _build_dbu_pricing(state: TuiState, config: AppConfig) -> dict[str, float] | None:
@@ -309,9 +342,8 @@ def _fetch_dbu_rates_background(
     thread = threading.Thread(target=_fetch, daemon=True)
     thread.start()
 
-    while thread.is_alive():
-        live.update(build_layout(state, console.height))
-        thread.join(timeout=0.15)
+    if not _wait_for_thread(thread, state, live, console):
+        return
 
     if "entries" in result:
         entries = result["entries"]
@@ -370,9 +402,9 @@ def _fetch_prices_background(
     thread = threading.Thread(target=_fetch, daemon=True)
     thread.start()
 
-    while thread.is_alive():
-        live.update(build_layout(state, console.height))
-        thread.join(timeout=0.15)
+    if not _wait_for_thread(thread, state, live, console):
+        state.pricing_loading = False
+        return
 
     state.pricing_loading = False
 
@@ -405,22 +437,32 @@ def _run_tui_loop(
         screen=True,
         refresh_per_second=10,
     ) as live:
-        # Auto-fetch pricing on TUI startup if enabled and not already loaded
-        if config.pricing.auto_fetch_pricing and not state.pricing_loaded:
+        # Auto-fetch pricing on TUI startup if enabled, region is set, and not already loaded
+        has_region = bool(config.pricing.azure_region)
+        if config.pricing.auto_fetch_pricing and not state.pricing_loaded and has_region:
             _fetch_prices_background(state, config, live, console)
             live.update(build_layout(state, console.height))
+
+        if state.should_quit:
+            return
 
         # Fetch DBU rates in background if not cached
         _has_dbu = any(n.dbu_per_hour is not None for n in (state.inventory.compute if state.inventory else []))
         if not _has_dbu:
             _fetch_dbu_rates_background(state, config, live, console)
             live.update(build_layout(state, console.height))
-        elif not state.dbu_unit_prices:
+        elif not state.dbu_unit_prices and has_region:
             # DBU counts are cached but per-DBU unit prices are missing
             # (e.g. old cache format). Fetch prices
             # from the Azure Retail Prices API (lightweight call).
             _fetch_dbu_unit_prices_background(state, config, live, console)
             live.update(build_layout(state, console.height))
+
+        if state.should_quit:
+            return
+
+        if not has_region and not state.pricing_loaded:
+            state.status_message = "No Azure region set. Press $ to configure pricing."
 
         while not state.should_quit:
             # Read a keypress (blocking)
@@ -743,10 +785,10 @@ def _fetch_model_threaded(
     thread = threading.Thread(target=_fetch, daemon=True)
     thread.start()
 
-    # Spin while thread is alive, updating the spinner
-    while thread.is_alive():
-        live.update(build_layout(state, console.height))
-        thread.join(timeout=0.15)
+    # Spin while thread is alive, allowing q to quit
+    if not _wait_for_thread(thread, state, live, console):
+        state.loading = False
+        return
 
     state.loading = False
 
@@ -854,9 +896,9 @@ def _discover_trending(
     thread = threading.Thread(target=_fetch, daemon=True)
     thread.start()
 
-    while thread.is_alive():
-        live.update(build_layout(state, console.height))
-        thread.join(timeout=0.15)
+    if not _wait_for_thread(thread, state, live, console):
+        state.loading = False
+        return
 
     state.loading = False
 
@@ -1067,9 +1109,8 @@ def _fetch_dbu_unit_prices_background(
     thread = threading.Thread(target=_fetch, daemon=True)
     thread.start()
 
-    while thread.is_alive():
-        live.update(build_layout(state, console.height))
-        thread.join(timeout=0.15)
+    if not _wait_for_thread(thread, state, live, console):
+        return
 
     unit_prices = result.get("unit_prices")
     if unit_prices:

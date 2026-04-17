@@ -43,10 +43,10 @@ _WORKLOAD_CYCLE = [WorkloadType.ALL_PURPOSE, WorkloadType.JOBS_COMPUTE]
 class PricingAdjustments:
     """Organization-specific pricing adjustments applied on top of list prices."""
 
-    discount_rate: float = 0.375
-    vat_rate: float = 0.19
+    discount_rate: float = 0.0
+    vat_rate: float = 0.0
     currency_code: str = "USD"
-    azure_region: str = "westeurope"
+    azure_region: str = ""
     price_cache_ttl_seconds: int = 14400  # 4 hours
     auto_fetch_pricing: bool = True
 
@@ -108,10 +108,10 @@ DEFAULT_CONFIG_TEMPLATE = dedent(
     # such as DATABRICKS_HOST and DATABRICKS_TOKEN instead of embedding them here.
 
     [pricing]
-    discount_rate = 0.375
-    vat_rate = 0.19
+    discount_rate = 0.0
+    vat_rate = 0.0
     currency_code = "USD"
-    azure_region = "westeurope"
+    azure_region = ""
     price_cache_ttl_seconds = 14400
     auto_fetch_pricing = true
 

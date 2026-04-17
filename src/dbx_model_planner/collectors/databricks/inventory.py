@@ -4,6 +4,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,17 +79,27 @@ class DatabricksInventoryCollector:
         self._credentials = credentials
         self._host = credentials.host.rstrip("/")
 
-    def collect(self) -> DatabricksInventoryCollection:
+    def collect(
+        self,
+        *,
+        progress_fn: Callable[[str], None] | None = None,
+    ) -> DatabricksInventoryCollection:
         """Collect full workspace inventory from the live Databricks API."""
 
         notes: list[str] = []
 
+        if progress_fn:
+            progress_fn("Fetching node types...")
         node_types = self._fetch_node_types()
         notes.append(f"Fetched {len(node_types)} node types")
 
+        if progress_fn:
+            progress_fn("Fetching runtime versions...")
         dbr_versions = self._fetch_dbr_versions()
         notes.append(f"Fetched {len(dbr_versions)} runtime versions")
 
+        if progress_fn:
+            progress_fn("Fetching cluster policies...")
         policies = self._fetch_policies()
         notes.append(f"Fetched {len(policies)} cluster policies")
 

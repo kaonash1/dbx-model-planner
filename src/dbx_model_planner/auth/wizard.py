@@ -164,17 +164,38 @@ def _prompt_huggingface_credentials(
     return HuggingFaceCredentials(token=token_input if token_input else None)
 
 
+def _prompt_azure_region(
+    input_fn: InputFn,
+    output_fn: OutputFn,
+) -> str:
+    """Prompt the user for their Azure region (used for pricing lookups)."""
+    output_fn("")
+    output_fn("=== Azure Region ===")
+    output_fn("")
+    output_fn("Enter the Azure region for your Databricks workspace.")
+    output_fn("This is used to fetch accurate VM prices.")
+    output_fn("  (e.g., eastus, westeurope, westus2)")
+    output_fn("")
+
+    while True:
+        region = input_fn("region> ").strip().lower()
+        if region:
+            return region
+        output_fn("Region is required for pricing. Please enter a value.")
+        output_fn("")
+
+
 def run_auth_wizard(
     input_fn: InputFn = input,
     output_fn: OutputFn = print,
-) -> tuple[DatabricksCredentials | None, HuggingFaceCredentials | None]:
+) -> tuple[DatabricksCredentials | None, HuggingFaceCredentials | None, str | None]:
     try:
         from .keyring import _check_keyring_available
         _check_keyring_available()
     except KeyringNotAvailableError:
         output_fn("Error: System keyring is not available.")
         output_fn("Cannot save credentials securely. Please install/configure your system's keyring.")
-        return None, None
+        return None, None, None
 
     output_fn("")
     output_fn("=== dbx-model-planner Authentication ===")
@@ -182,9 +203,11 @@ def run_auth_wizard(
     
     dbx_creds = _prompt_databricks_credentials(input_fn, output_fn)
     if dbx_creds is None:
-        return None, None
+        return None, None, None
     
     hf_creds = _prompt_huggingface_credentials(input_fn, output_fn, required=False)
+    
+    azure_region = _prompt_azure_region(input_fn, output_fn)
     
     output_fn("")
     output_fn("=== Saving Credentials ===")
@@ -194,11 +217,13 @@ def run_auth_wizard(
         save_credential(DATABRICKS_CREDENTIAL_NAME, {
             "host": dbx_creds.host,
             "token": dbx_creds.token,
+            "azure_region": azure_region,
         })
         output_fn(f"  Databricks: {dbx_creds.host} ({dbx_creds.masked_token()})")
+        output_fn(f"  Azure region: {azure_region}")
     except Exception as exc:
         output_fn(f"  Failed to save Databricks credentials: {exc}")
-        return None, None
+        return None, None, None
     
     if hf_creds and hf_creds.token:
         try:
@@ -213,19 +238,21 @@ def run_auth_wizard(
     output_fn("Credentials saved to system keyring.")
     output_fn("")
     
-    return dbx_creds, hf_creds
+    return dbx_creds, hf_creds, azure_region
 
 
-def load_stored_credentials() -> tuple[DatabricksCredentials | None, HuggingFaceCredentials | None]:
+def load_stored_credentials() -> tuple[DatabricksCredentials | None, HuggingFaceCredentials | None, str | None]:
     dbx_data = load_credential(DATABRICKS_CREDENTIAL_NAME)
     hf_data = load_credential(HUGGINGFACE_CREDENTIAL_NAME)
     
     dbx_creds = None
+    azure_region = None
     if dbx_data:
         dbx_creds = DatabricksCredentials(
             host=dbx_data.get("host", ""),
             token=dbx_data.get("token", ""),
         )
+        azure_region = dbx_data.get("azure_region")
     
     hf_creds = None
     if hf_data:
@@ -233,7 +260,7 @@ def load_stored_credentials() -> tuple[DatabricksCredentials | None, HuggingFace
             token=hf_data.get("token"),
         )
     
-    return dbx_creds, hf_creds
+    return dbx_creds, hf_creds, azure_region
 
 
 def clear_stored_credentials(
@@ -272,7 +299,9 @@ def show_credential_status(output_fn: OutputFn = print) -> None:
         host = dbx_data.get("host", "unknown")
         token = dbx_data.get("token", "")
         masked = token[:4] + "..." + token[-4:] if len(token) > 8 else "***"
+        region = dbx_data.get("azure_region", "not set")
         output_fn(f"  Databricks: {host} ({masked})")
+        output_fn(f"  Azure region: {region}")
     else:
         output_fn("  Databricks: Not configured")
     

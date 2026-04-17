@@ -171,22 +171,19 @@ class ComposeCostProfileTests(unittest.TestCase):
         self.assertIsNone(cost.estimated_hourly_rate)
 
     def test_default_config_discount_and_vat(self) -> None:
-        """AppConfig defaults must use 37.5% discount and 19% VAT."""
+        """AppConfig defaults must use 0% discount and 0% VAT (user must configure)."""
         config = AppConfig()
 
-        self.assertEqual(config.pricing.discount_rate, 0.375)
-        self.assertEqual(config.pricing.vat_rate, 0.19)
+        self.assertEqual(config.pricing.discount_rate, 0.0)
+        self.assertEqual(config.pricing.vat_rate, 0.0)
         self.assertEqual(config.pricing.currency_code, "USD")
 
-        # Verify the defaults produce correct results
+        # With no discount/VAT, all three rates are the same
         cost = compose_cost_profile(config, vm_hourly_rate=19.108, dbu_hourly_rate=24.20)
 
-        # total = 43.308
         self.assertAlmostEqual(cost.estimated_hourly_rate, 43.308, places=2)
-        # discounted = 43.308 * 0.625 = 27.0675
-        self.assertAlmostEqual(cost.discounted_hourly_rate, 27.0675, places=2)
-        # vat = 27.0675 * 1.19 = 32.2103
-        self.assertAlmostEqual(cost.vat_adjusted_hourly_rate, 32.2103, places=2)
+        self.assertAlmostEqual(cost.discounted_hourly_rate, 43.308, places=2)
+        self.assertAlmostEqual(cost.vat_adjusted_hourly_rate, 43.308, places=2)
 
     def test_nc96ads_a100_v4_real_world_pricing(self) -> None:
         """Validate the NC96ads A100 v4 pricing against colleague's verified numbers.

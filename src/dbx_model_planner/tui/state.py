@@ -112,8 +112,8 @@ class TuiState:
     pricing_region: str | None = None
     pricing_error: str | None = None
     pricing_node_count: int = 0  # How many nodes have prices
-    pricing_discount: float = 0.375  # from config.pricing.discount_rate
-    pricing_vat: float = 0.19  # from config.pricing.vat_rate
+    pricing_discount: float = 0.0  # from config.pricing.discount_rate
+    pricing_vat: float = 0.0  # from config.pricing.vat_rate
     currency_code: str = "USD"  # from config.pricing.currency_code
     dbu_rate_per_unit: float = 0.55  # from config.databricks.dbu_rate_per_unit
     workload_type: str = "all_purpose"  # from config.databricks.workload_type

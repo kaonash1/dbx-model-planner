@@ -10,7 +10,7 @@ A workspace-aware planner for sizing and costing open models on Azure Databricks
 
 - **Live workspace inventory** — fetches available node types, GPU specs, and cluster policies directly from your Databricks workspace
 - **Model fit analysis** — estimates VRAM requirements for any HuggingFace model using architecture-aware KV cache sizing, and ranks compute by fit level (safe / borderline / unlikely)
-- **Azure pricing** — real VM prices from the Azure Retail Prices API, combined with DBU rates, enterprise discounts, and VAT
+- **Azure pricing** — real VM prices from the Azure Retail Prices API in USD, combined with DBU rates
 - **What-if analysis** — explore how quantization and context length affect fit and cost across all GPU nodes
 - **Interactive TUI** — full-screen terminal interface with keyboard navigation, model browsing, and a pricing setup wizard
 
@@ -42,7 +42,7 @@ pip install .
 dbx-model-planner
 ```
 
-On first launch, you'll be prompted for your Databricks workspace URL, API token, and (optionally) a HuggingFace token. Credentials are stored in the system keyring — never written to files.
+On first launch, you'll be prompted for your Databricks workspace URL, API token, Azure region, and (optionally) a HuggingFace token. Credentials are stored in the system keyring — never written to files.
 
 Use `j`/`k` to navigate, `m` to fit a model, `w` for what-if analysis, `$` for pricing setup, and `q` to quit.
 
@@ -56,7 +56,7 @@ dbx-model-planner auth status   # Show credential status
 
 ### Configuration
 
-Default pricing assumes 37.5% enterprise discount, 19% VAT, and All-Purpose Compute DBU rates. Press `$` in the TUI to change these, or set them in a config file:
+Pricing shows list prices by default. Press `$` in the TUI to configure pricing parameters, or set them in a config file:
 
 ```bash
 dbx-model-planner --config-path config.toml
