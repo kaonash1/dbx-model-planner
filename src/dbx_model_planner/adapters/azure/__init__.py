@@ -5,6 +5,15 @@ from .enricher import (
     build_azure_cost_profile,
     enrich_azure_compute,
 )
+from .price_cache import (
+    DEFAULT_CACHE_TTL_SECONDS,
+    PriceCache,
+    PriceCacheEntry,
+    fetch_bulk_vm_prices,
+    load_price_cache,
+    refresh_price_cache,
+    save_price_cache,
+)
 from .pricing import (
     AZURE_RETAIL_PRICES_ENDPOINT,
     AzureRetailPriceQuery,
@@ -39,13 +48,18 @@ __all__ = [
     "AzureRetailPriceSavingsPlan",
     "AzureRetailPricesPage",
     "AzureSkuMapping",
+    "DEFAULT_CACHE_TTL_SECONDS",
+    "PriceCache",
+    "PriceCacheEntry",
     "arm_sku_candidates_from_node_type",
     "build_azure_cost_profile",
     "build_azure_retail_prices_url",
     "enrich_azure_compute",
     "fetch_azure_retail_prices",
+    "fetch_bulk_vm_prices",
     "infer_gpu_family",
     "infer_vm_series",
+    "load_price_cache",
     "map_node_type_to_azure_sku",
     "normalize_azure_region",
     "normalize_azure_restrictions",
@@ -53,5 +67,7 @@ __all__ = [
     "normalize_node_type_id",
     "parse_azure_retail_price_item",
     "parse_azure_retail_prices_page",
+    "refresh_price_cache",
+    "save_price_cache",
     "select_azure_retail_price",
 ]
