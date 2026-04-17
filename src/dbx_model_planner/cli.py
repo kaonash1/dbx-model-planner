@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -9,14 +8,32 @@ import typer
 from rich.console import Console
 
 from dbx_model_planner.adapters.azure import build_azure_cost_profile, enrich_azure_compute
-from dbx_model_planner.adapters.huggingface import normalize_huggingface_repo_metadata
-from dbx_model_planner.catalog import list_example_models, resolve_example_model
-from dbx_model_planner.collectors.databricks import DatabricksInventoryCollector
+from dbx_model_planner.adapters.huggingface import (
+    GatedRepoError,
+    HuggingFaceAPIError,
+    fetch_huggingface_metadata,
+    normalize_huggingface_repo_metadata,
+)
+from dbx_model_planner.auth import (
+    KeyringNotAvailableError,
+    clear_stored_credentials,
+    load_stored_credentials,
+    run_auth_wizard,
+    show_credential_status,
+)
+from dbx_model_planner.collectors.databricks import DatabricksAPIError, DatabricksInventoryCollector
+from dbx_model_planner.collectors.databricks.inventory import enrich_dbu_rates
+from dbx_model_planner.adapters.azure.dbu_rates import (
+    build_dbu_rate_cache,
+    fetch_dbu_rates,
+    fetch_dbu_unit_prices,
+    load_dbu_cache,
+    save_dbu_cache,
+)
 from dbx_model_planner.config import AppConfig, load_app_config
 from dbx_model_planner.domain import WorkloadProfile, WorkspaceComputeProfile, WorkspaceInventorySnapshot
-from dbx_model_planner.planners import build_deployment_hint, recommend_compute_for_model, recommend_models_for_compute
+from dbx_model_planner.planners import build_deployment_hint, recommend_compute_for_model
 from dbx_model_planner.presentation import (
-    render_compute_fit,
     render_deployment_hint,
     render_inventory,
     render_json,
@@ -25,6 +42,7 @@ from dbx_model_planner.presentation import (
 from dbx_model_planner.runtime import build_runtime_context
 from dbx_model_planner.storage import SQLiteSnapshotStore
 from dbx_model_planner.terminal_app import run_terminal_app
+from dbx_model_planner.tui import run_tui
 
 console = Console()
 
@@ -32,15 +50,15 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Plan model-to-compute fit, pricing, and deployment hints for Azure Databricks.",
 )
+auth_app = typer.Typer(help="Manage credentials stored in system keyring.")
 inventory_app = typer.Typer(help="Sync or inspect Databricks inventory.")
 model_app = typer.Typer(help="Run model-first planning commands.")
-compute_app = typer.Typer(help="Run compute-first planning commands.")
 price_app = typer.Typer(help="Estimate cost for a compute profile.")
 deploy_app = typer.Typer(help="Generate a minimal deployment hint.")
 
+app.add_typer(auth_app, name="auth")
 app.add_typer(inventory_app, name="inventory")
 app.add_typer(model_app, name="model")
-app.add_typer(compute_app, name="compute")
 app.add_typer(price_app, name="price")
 app.add_typer(deploy_app, name="deploy")
 
@@ -50,71 +68,112 @@ DataDirOption = typer.Option(None, "--data-dir", help="Optional data directory f
 JsonOption = typer.Option(False, "--json", help="Emit JSON instead of text.")
 
 
-@app.command("app")
-def terminal_app(
-    config_path: Path | None = ConfigPathOption,
-    data_dir: Path | None = DataDirOption,
-) -> None:
-    """Open the lightweight interactive terminal app."""
+# -- Auth commands -----------------------------------------------------------
 
-    config, store = _load_runtime(config_path=config_path, data_dir=data_dir)
-    snapshot, _ = _load_inventory_snapshot(store)
-    raise typer.Exit(run_terminal_app(config=config, inventory=snapshot))
+
+@auth_app.command("login")
+def auth_login() -> None:
+    """Interactively configure Databricks and HuggingFace credentials."""
+
+    try:
+        run_auth_wizard(input_fn=input, output_fn=console.print)
+    except KeyringNotAvailableError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+
+@auth_app.command("logout")
+def auth_logout() -> None:
+    """Remove all stored credentials from system keyring."""
+
+    try:
+        clear_stored_credentials(input_fn=input, output_fn=console.print)
+    except KeyringNotAvailableError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+
+@auth_app.command("status")
+def auth_status() -> None:
+    """Show current credential status."""
+
+    try:
+        show_credential_status(output_fn=console.print)
+    except KeyringNotAvailableError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+
+# -- Interactive app ---------------------------------------------------------
+
+
+@app.command("app")
+def terminal_app_cmd(
+    config_path: Path | None = ConfigPathOption,
+    classic: bool = typer.Option(False, "--classic", help="Use text-based terminal app instead of TUI."),
+) -> None:
+    """Open the interactive terminal planner (credentials required)."""
+
+    config = _load_config(config_path)
+    if classic:
+        raise typer.Exit(run_terminal_app(config=config))
+    raise typer.Exit(run_tui(config=config))
+
+
+# -- Inventory ---------------------------------------------------------------
 
 
 @inventory_app.command("sync")
 def inventory_sync(
-    fixture_path: Path | None = typer.Option(None, "--fixture-path", help="Path to a Databricks inventory JSON fixture."),
     config_path: Path | None = ConfigPathOption,
     data_dir: Path | None = DataDirOption,
     json_output: bool = JsonOption,
 ) -> None:
-    """Load inventory from a fixture and store it locally."""
+    """Sync Databricks inventory from live workspace API."""
 
     _, store = _load_runtime(config_path=config_path, data_dir=data_dir)
-    collector = DatabricksInventoryCollector(fixture_path=fixture_path)
-    collection = collector.collect()
+    dbx_creds = _require_databricks_credentials()
+
+    try:
+        collector = DatabricksInventoryCollector(credentials=dbx_creds)
+        collection = collector.collect()
+    except DatabricksAPIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    _enrich_snapshot_dbu_rates(collection.snapshot)
     store.save_inventory_snapshot(collection.snapshot)
 
-    payload = {
-        "snapshot": collection.snapshot,
-        "notes": collection.notes,
-        "pools": collection.pools,
-        "snapshot_path": str(store.path),
-    }
-    _print_output(payload if json_output else collection.snapshot, as_json=json_output, text_renderer=render_inventory)
-    if not json_output:
-        console.print(f"Snapshot store: {store.path}")
+    if json_output:
+        console.print(render_json({"snapshot": collection.snapshot, "notes": collection.notes}))
+    else:
+        console.print(render_inventory(collection.snapshot))
+        console.print(f"\nSnapshot saved to: {store.path}")
         for note in collection.notes:
-            console.print(f"- {note}")
+            console.print(f"  - {note}")
 
 
-@model_app.command("examples")
-def model_examples() -> None:
-    """List bundled example models."""
-
-    for key, label, repo_id in list_example_models():
-        console.print(f"{key}: {label} ({repo_id})")
+# -- Model -------------------------------------------------------------------
 
 
 @model_app.command("fit")
 def model_fit(
-    model_ref: str = typer.Argument(..., help="Example key, repo id, or model fixture reference."),
-    model_fixture: Path | None = typer.Option(None, "--model-fixture", help="Path to a local Hugging Face metadata fixture JSON file."),
+    model_ref: str = typer.Argument(..., help="HuggingFace repository ID (e.g., meta-llama/Llama-3.1-8B-Instruct)."),
     config_path: Path | None = ConfigPathOption,
     data_dir: Path | None = DataDirOption,
     json_output: bool = JsonOption,
     batch: bool = typer.Option(False, "--batch", help="Plan for batch compute instead of online inference."),
-    expected_qps: float | None = typer.Option(None, "--expected-qps", help="Optional QPS hint for embeddings or online inference."),
+    expected_qps: float | None = typer.Option(None, "--expected-qps", help="Optional QPS hint."),
     target_concurrency: int | None = typer.Option(None, "--target-concurrency", help="Optional concurrency hint."),
     azure_pricing: bool = typer.Option(False, "--azure-pricing", help="Try public Azure Retail Prices lookup."),
 ) -> None:
-    """Show candidate compute for a model."""
+    """Show candidate compute for a HuggingFace model."""
 
     config, store = _load_runtime(config_path=config_path, data_dir=data_dir)
-    snapshot, inventory_source = _load_inventory_snapshot(store)
-    normalized = _load_model(model_ref, model_fixture)
+    snapshot = _load_inventory(store)
+    normalized = _fetch_model(model_ref)
     model = normalized.model_profile
+
     workload = WorkloadProfile(
         workload_name="model-fit",
         online=not batch,
@@ -125,6 +184,7 @@ def model_fit(
     vm_pricing = {}
     if azure_pricing:
         vm_pricing, _ = _azure_vm_pricing_map(config, snapshot)
+
     recommendation = recommend_compute_for_model(
         config=config,
         inventory=snapshot,
@@ -133,53 +193,14 @@ def model_fit(
         vm_pricing=vm_pricing,
         dbu_pricing=_dbu_pricing_map(config, snapshot),
     )
-    payload = {
-        "inventory_source": inventory_source,
-        "model": normalized,
-        "recommendation": recommendation,
-    }
-    _print_output(payload if json_output else recommendation, as_json=json_output, text_renderer=render_model_recommendation)
+
+    if json_output:
+        console.print(render_json({"model": normalized, "recommendation": recommendation}))
+    else:
+        console.print(render_model_recommendation(recommendation))
 
 
-@compute_app.command("fit")
-def compute_fit(
-    node_type: str = typer.Argument(..., help="Databricks node type id, for example Standard_NC6s_v3."),
-    config_path: Path | None = ConfigPathOption,
-    data_dir: Path | None = DataDirOption,
-    json_output: bool = JsonOption,
-    azure_pricing: bool = typer.Option(False, "--azure-pricing", help="Try public Azure Retail Prices lookup."),
-) -> None:
-    """Show realistic bundled models for a compute profile."""
-
-    config, store = _load_runtime(config_path=config_path, data_dir=data_dir)
-    snapshot, inventory_source = _load_inventory_snapshot(store)
-    compute = _resolve_compute(snapshot, node_type)
-    models = [resolve_example_model(key).model_profile for key, _, _ in list_example_models()]
-
-    vm_hourly_rate = None
-    if azure_pricing:
-        enrichment = enrich_azure_compute(
-            compute,
-            dbu_hourly_rate=config.databricks.dbu_hourly_rate or None,
-            discount_rate=config.pricing.discount_rate,
-            vat_rate=config.pricing.vat_rate,
-            currency_code=config.pricing.currency_code,
-        )
-        if enrichment.selected_price is not None:
-            vm_hourly_rate = enrichment.selected_price.unit_price
-
-    report = recommend_models_for_compute(
-        config=config,
-        compute=compute,
-        models=models,
-        vm_hourly_rate=vm_hourly_rate,
-        dbu_hourly_rate=config.databricks.dbu_hourly_rate or None,
-    )
-    payload = {
-        "inventory_source": inventory_source,
-        "report": report,
-    }
-    _print_output(payload if json_output else report, as_json=json_output, text_renderer=render_compute_fit)
+# -- Price -------------------------------------------------------------------
 
 
 @price_app.command("estimate")
@@ -195,22 +216,18 @@ def price_estimate(
     """Estimate price from Azure or explicit rates."""
 
     config, store = _load_runtime(config_path=config_path, data_dir=data_dir)
-    snapshot, inventory_source = _load_inventory_snapshot(store)
+    snapshot = _load_inventory(store)
     compute = _resolve_compute(snapshot, node_type)
 
     if azure_pricing:
         enrichment = enrich_azure_compute(
             compute,
-            dbu_hourly_rate=dbu_rate if dbu_rate is not None else (config.databricks.dbu_hourly_rate or None),
+            dbu_hourly_rate=dbu_rate if dbu_rate is not None else None,
             discount_rate=config.pricing.discount_rate,
             vat_rate=config.pricing.vat_rate,
             currency_code=config.pricing.currency_code,
         )
-        payload = {
-            "inventory_source": inventory_source,
-            "enrichment": enrichment,
-        }
-        _print_output(payload if json_output else enrichment, as_json=json_output, text_renderer=render_json)
+        console.print(render_json(enrichment))
         return
 
     if vm_rate is None:
@@ -218,37 +235,36 @@ def price_estimate(
 
     cost = build_azure_cost_profile(
         vm_hourly_rate=vm_rate,
-        dbu_hourly_rate=dbu_rate if dbu_rate is not None else (config.databricks.dbu_hourly_rate or None),
+        dbu_hourly_rate=dbu_rate if dbu_rate is not None else None,
         discount_rate=config.pricing.discount_rate,
         vat_rate=config.pricing.vat_rate,
         currency_code=config.pricing.currency_code,
     )
-    payload = {
-        "inventory_source": inventory_source,
-        "node_type_id": compute.node_type_id,
-        "cost": cost,
-    }
-    _print_output(payload, as_json=json_output, text_renderer=render_json)
+    console.print(render_json({"node_type_id": compute.node_type_id, "cost": cost}))
+
+
+# -- Deploy ------------------------------------------------------------------
 
 
 @deploy_app.command("plan")
 def deploy_plan(
-    model_ref: str = typer.Argument(..., help="Example key, repo id, or model fixture reference."),
-    model_fixture: Path | None = typer.Option(None, "--model-fixture", help="Path to a local Hugging Face metadata fixture JSON file."),
+    model_ref: str = typer.Argument(..., help="HuggingFace repository ID."),
     config_path: Path | None = ConfigPathOption,
     data_dir: Path | None = DataDirOption,
     json_output: bool = JsonOption,
     azure_pricing: bool = typer.Option(False, "--azure-pricing", help="Try public Azure Retail Prices lookup."),
 ) -> None:
-    """Build a simple UC volume and cluster hint."""
+    """Build a UC volume and cluster hint for a HuggingFace model."""
 
     config, store = _load_runtime(config_path=config_path, data_dir=data_dir)
-    snapshot, inventory_source = _load_inventory_snapshot(store)
-    normalized = _load_model(model_ref, model_fixture)
+    snapshot = _load_inventory(store)
+    normalized = _fetch_model(model_ref)
     model = normalized.model_profile
+
     vm_pricing = {}
     if azure_pricing:
         vm_pricing, _ = _azure_vm_pricing_map(config, snapshot)
+
     recommendation = recommend_compute_for_model(
         config=config,
         inventory=snapshot,
@@ -258,15 +274,24 @@ def deploy_plan(
         dbu_pricing=_dbu_pricing_map(config, snapshot),
     )
     hint = build_deployment_hint(config, snapshot, model, recommendation)
-    payload = {
-        "inventory_source": inventory_source,
-        "recommendation": recommendation,
-        "hint": hint,
-    }
-    _print_output(payload if json_output else hint, as_json=json_output, text_renderer=render_deployment_hint)
+
+    if json_output:
+        console.print(render_json({"recommendation": recommendation, "hint": hint}))
+    else:
+        console.print(render_deployment_hint(hint))
 
 
-def _load_runtime(config_path: Path | None = None, data_dir: Path | None = None) -> tuple[AppConfig, SQLiteSnapshotStore]:
+# -- Helpers -----------------------------------------------------------------
+
+
+def _load_config(config_path: Path | None = None) -> AppConfig:
+    return load_app_config(config_path=config_path)
+
+
+def _load_runtime(
+    config_path: Path | None = None,
+    data_dir: Path | None = None,
+) -> tuple[AppConfig, SQLiteSnapshotStore]:
     config = load_app_config(config_path=config_path)
     try:
         context = build_runtime_context(config, config_path=config_path, data_dir=data_dir)
@@ -277,18 +302,53 @@ def _load_runtime(config_path: Path | None = None, data_dir: Path | None = None)
     return config, store
 
 
-def _load_inventory_snapshot(store: SQLiteSnapshotStore) -> tuple[WorkspaceInventorySnapshot, str]:
+def _require_databricks_credentials():
+    """Load Databricks credentials or exit with an error."""
+    try:
+        dbx_creds, _ = load_stored_credentials()
+    except KeyringNotAvailableError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if dbx_creds is None:
+        console.print("[red]Error:[/red] No Databricks credentials found.")
+        console.print("Run 'dbx-model-planner auth login' first.")
+        raise typer.Exit(code=1)
+    return dbx_creds
+
+
+def _load_inventory(store: SQLiteSnapshotStore) -> WorkspaceInventorySnapshot:
+    """Load inventory from snapshot store, or fail with guidance."""
     stored = store.load_inventory_snapshot()
     if stored is not None:
-        return stored, "stored"
-    return DatabricksInventoryCollector().collect_snapshot(), "mock"
+        # Ensure DBU rates are populated (may be missing on old snapshots)
+        has_dbu = any(c.dbu_per_hour is not None for c in stored.compute)
+        if not has_dbu:
+            _enrich_snapshot_dbu_rates(stored)
+        return stored
+    console.print("[yellow]No inventory snapshot found.[/yellow]")
+    console.print("Run 'dbx-model-planner inventory sync' first.")
+    raise typer.Exit(code=1)
 
 
-def _load_model(model_ref: str, model_fixture: Path | None) -> Any:
-    if model_fixture:
-        payload = json.loads(model_fixture.read_text(encoding="utf-8"))
-        return normalize_huggingface_repo_metadata(payload)
-    return resolve_example_model(model_ref)
+def _fetch_model(model_ref: str):
+    """Fetch and normalize a HuggingFace model, or exit with an error."""
+    try:
+        hf_creds = None
+        try:
+            _, hf_creds = load_stored_credentials()
+        except KeyringNotAvailableError:
+            pass
+
+        raw_metadata = fetch_huggingface_metadata(model_ref, credentials=hf_creds)
+        return normalize_huggingface_repo_metadata(raw_metadata)
+    except GatedRepoError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        console.print("Run 'dbx-model-planner auth login' to add your HuggingFace token.")
+        raise typer.Exit(code=1)
+    except HuggingFaceAPIError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
 
 
 def _resolve_compute(snapshot: WorkspaceInventorySnapshot, node_type: str) -> WorkspaceComputeProfile:
@@ -299,9 +359,51 @@ def _resolve_compute(snapshot: WorkspaceInventorySnapshot, node_type: str) -> Wo
 
 
 def _dbu_pricing_map(config: AppConfig, snapshot: WorkspaceInventorySnapshot) -> dict[str, float]:
-    if config.databricks.dbu_hourly_rate <= 0:
+    """Build {node_type_id: dbu_hourly_cost} for all compute nodes.
+
+    Uses the per-DBU unit price from the DBU rate cache (fetched from
+    the Azure Retail Prices API in USD) if available,
+    falling back to ``config.databricks.dbu_rate_per_unit``.
+
+    Formula: DBU_cost = DBU_Count × per_DBU_unit_rate.
+    """
+    rate = config.databricks.dbu_rate_per_unit
+
+    # Check if the DBU rate cache has API-derived per-DBU prices
+    cache = load_dbu_cache()
+    if cache is not None and cache.dbu_unit_prices and cache.unit_price_currency == config.pricing.currency_code:
+        wt = config.databricks.workload_type
+        api_rate = cache.dbu_unit_prices.get(wt)
+        if api_rate is not None:
+            rate = api_rate
+
+    if rate <= 0:
         return {}
-    return {compute.node_type_id: config.databricks.dbu_hourly_rate for compute in snapshot.compute}
+    result: dict[str, float] = {}
+    for compute in snapshot.compute:
+        dbu_per_hour = compute.dbu_per_hour
+        if dbu_per_hour is not None and dbu_per_hour > 0:
+            result[compute.node_type_id] = round(dbu_per_hour * rate, 4)
+    return result
+
+
+def _enrich_snapshot_dbu_rates(snapshot: WorkspaceInventorySnapshot) -> None:
+    """Enrich snapshot compute nodes with real DBU rates from Azure pricing page."""
+    cache = load_dbu_cache()
+    if cache is not None and cache.is_populated:
+        enrich_dbu_rates(snapshot.compute, cache.as_dict())
+        return
+    try:
+        entries = fetch_dbu_rates(timeout=60.0)
+        if entries:
+            new_cache = build_dbu_rate_cache(entries)
+            enrich_dbu_rates(snapshot.compute, new_cache.as_dict())
+            try:
+                save_dbu_cache(new_cache)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _azure_vm_pricing_map(
@@ -314,7 +416,7 @@ def _azure_vm_pricing_map(
         try:
             enrichment = enrich_azure_compute(
                 compute,
-                dbu_hourly_rate=config.databricks.dbu_hourly_rate or None,
+                dbu_hourly_rate=None,
                 discount_rate=config.pricing.discount_rate,
                 vat_rate=config.pricing.vat_rate,
                 currency_code=config.pricing.currency_code,
@@ -326,13 +428,6 @@ def _azure_vm_pricing_map(
             prices[compute.node_type_id] = enrichment.selected_price.unit_price
         details[compute.node_type_id] = render_json(enrichment)
     return prices, details
-
-
-def _print_output(payload: Any, *, as_json: bool, text_renderer) -> None:
-    if as_json:
-        console.print(render_json(payload))
-        return
-    console.print(text_renderer(payload))
 
 
 if __name__ == "__main__":
