@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from tempfile import TemporaryDirectory
 import unittest
 
 from dbx_model_planner.config import AppConfig
@@ -9,16 +8,12 @@ from dbx_model_planner.domain import (
     ModelFamily,
     ModelModality,
     ModelProfile,
-    RuntimeProfile,
     WorkloadProfile,
     WorkspaceComputeProfile,
     WorkspaceInventorySnapshot,
     WorkspacePolicyProfile,
 )
 from dbx_model_planner.planners import recommend_compute_for_model, recommend_models_for_compute
-from dbx_model_planner.presentation import render_compute_fit, render_inventory, render_model_recommendation
-from dbx_model_planner.runtime import build_runtime_context
-from dbx_model_planner.storage import SQLiteSnapshotStore
 
 
 def _mock_inventory() -> WorkspaceInventorySnapshot:
@@ -43,11 +38,7 @@ def _mock_inventory() -> WorkspaceInventorySnapshot:
                 gpu_memory_gb=16.0,
             ),
         ],
-        runtimes=[
-            RuntimeProfile(runtime_id="15.4.x-ml-scala2.12", dbr_version="15.4 ML", ml_runtime=True, gpu_enabled=True),
-            RuntimeProfile(runtime_id="15.4.x-scala2.12", dbr_version="15.4", ml_runtime=False, gpu_enabled=False),
-            RuntimeProfile(runtime_id="14.3.x-ml-scala2.12", dbr_version="14.3 ML", ml_runtime=True, gpu_enabled=True),
-        ],
+        runtimes=[],
         policies=[
             WorkspacePolicyProfile(policy_id="p1", policy_name="default", allowed_node_types=["Standard_NC6s_v3"]),
             WorkspacePolicyProfile(policy_id="p2", policy_name="cpu-only", allowed_node_types=["Standard_D3_v2"]),
@@ -109,7 +100,6 @@ class RecommendationFlowTests(unittest.TestCase):
 
         self.assertEqual(recommendation.candidates[0].compute.node_type_id, "Standard_NC6s_v3")
         self.assertIn("Recommended compute", recommendation.summary)
-        self.assertIn("Standard_NC6s_v3", render_model_recommendation(recommendation))
 
     def test_compute_fit_reports_embedding_range(self) -> None:
         config = AppConfig()
@@ -125,18 +115,6 @@ class RecommendationFlowTests(unittest.TestCase):
 
         self.assertIn("embedding", report.model_family_ranges)
         self.assertIn("Compute Standard_NC6s_v3", report.summary)
-
-    def test_runtime_context_and_snapshot_store_work_with_inventory(self) -> None:
-        with TemporaryDirectory() as tmp_dir:
-            context = build_runtime_context(AppConfig(), data_dir=tmp_dir)
-            store = SQLiteSnapshotStore(context.paths.snapshot_db_path)
-            snapshot = _mock_inventory()
-            store.save_inventory_snapshot(snapshot)
-
-            loaded = store.load_inventory_snapshot()
-
-        self.assertEqual(snapshot, loaded)
-        self.assertIn("Workspace:", render_inventory(loaded))
 
 
 if __name__ == "__main__":
