@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from ..adapters.huggingface.catalog import CatalogEntry
@@ -91,6 +93,7 @@ class TuiState:
     fit_scroll_offset: int = 0
     fit_filter: FitFilter = FitFilter.ALL
     fit_displayed_candidates: list[CandidateCompute] = field(default_factory=list)
+    model_gated: bool = False
 
     # -- Model history --------------------------------------------------
     model_history: list[str] = field(default_factory=list)
@@ -134,10 +137,17 @@ class TuiState:
     whatif_selector_row: int = 0    # 0=quant selector, 1=context selector
     whatif_table_index: int = 0     # selected row in what-if results table
     whatif_table_offset: int = 0    # scroll offset for what-if table
+    whatif_turboquant: bool = False  # TurboQuant KV cache compression toggle
 
     # -- Status / messages ----------------------------------------------
     status_message: str = ""
     loading: bool = False
+
+    # -- Background fetch threads --------------------------------------
+    active_price_thread: threading.Thread | None = None
+    active_price_finalizer: Callable[[], None] | None = None
+    active_dbu_thread: threading.Thread | None = None
+    active_dbu_finalizer: Callable[[], None] | None = None
 
     # -- Quit signal ----------------------------------------------------
     should_quit: bool = False
@@ -190,8 +200,8 @@ class TuiState:
         self.displayed_nodes = self._sort_nodes(nodes)
 
     def _sort_nodes(self, nodes: list[WorkspaceComputeProfile]) -> list[WorkspaceComputeProfile]:
-        """Sort nodes by GPU memory descending (highest VRAM first)."""
-        return sorted(nodes, key=lambda n: (n.gpu_memory_gb or 0), reverse=True)
+        """Sort nodes by total GPU memory descending (per-GPU memory × GPU count)."""
+        return sorted(nodes, key=lambda n: ((n.gpu_memory_gb or 0) * (n.gpu_count or 0)), reverse=True)
 
     def toggle_cpu_nodes(self) -> None:
         """Toggle CPU node visibility."""
@@ -358,7 +368,7 @@ class TuiState:
         if self.inventory is None:
             return []
         nodes = [n for n in self.inventory.compute if n.gpu_count > 0]
-        nodes.sort(key=lambda n: (n.gpu_memory_gb or 0), reverse=True)
+        nodes.sort(key=lambda n: ((n.gpu_memory_gb or 0) * (n.gpu_count or 0)), reverse=True)
         return nodes
 
     def clamp_whatif_table(self) -> None:

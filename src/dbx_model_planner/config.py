@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -154,6 +155,46 @@ def write_default_config_template(path: Path | str) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(render_default_config_template(), encoding="utf-8")
     return destination
+
+
+def save_pricing_config(
+    *,
+    azure_region: str = "",
+    discount_rate: float = 0.0,
+    vat_rate: float = 0.0,
+    config_path: Path | str | None = None,
+) -> Path:
+    """Persist pricing settings (region, discount, VAT) to config.toml.
+
+    If the file exists, individual values are updated in-place.
+    Otherwise a fresh config is created from the default template.
+    """
+    path = _resolve_config_path(config_path, dict(os.environ))
+
+    _REPLACEMENTS: list[tuple[str, str]] = [
+        (r'azure_region\s*=\s*"[^"]*"', f'azure_region = "{azure_region}"'),
+        (r"discount_rate\s*=\s*[\d.]+", f"discount_rate = {discount_rate}"),
+        (r"vat_rate\s*=\s*[\d.]+", f"vat_rate = {vat_rate}"),
+    ]
+
+    if path.exists():
+        content = path.read_text(encoding="utf-8")
+        for pattern, replacement in _REPLACEMENTS:
+            content, n = re.subn(pattern, replacement, content, count=1)
+            if n == 0:
+                # Key not found — append to end of [pricing] section
+                content = content.rstrip() + f"\n{replacement}\n"
+        path.write_text(content, encoding="utf-8")
+    else:
+        # Generate from template with substituted values
+        content = DEFAULT_CONFIG_TEMPLATE
+        content = content.replace('azure_region = ""', f'azure_region = "{azure_region}"')
+        content = content.replace("discount_rate = 0.0", f"discount_rate = {discount_rate}")
+        content = content.replace("vat_rate = 0.0", f"vat_rate = {vat_rate}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content + "\n", encoding="utf-8")
+
+    return path
 
 
 def _default_config_path() -> Path:

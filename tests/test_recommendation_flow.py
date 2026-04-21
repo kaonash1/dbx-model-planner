@@ -35,7 +35,7 @@ def _mock_inventory() -> WorkspaceInventorySnapshot:
                 region="eastus2",
                 gpu_family="V100",
                 gpu_count=1,
-                gpu_memory_gb=16.0,
+                gpu_memory_gb=80.0,
             ),
         ],
         runtimes=[],

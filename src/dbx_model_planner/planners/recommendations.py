@@ -14,7 +14,8 @@ from dbx_model_planner.domain import (
     WorkspacePolicyProfile,
 )
 from dbx_model_planner.engines.cost import compose_cost_profile
-from dbx_model_planner.engines.fit import assess_compute_for_models, infer_model_family_range, rank_compute_candidates
+from dbx_model_planner.engines.fit import assess_compute_for_models, estimate_tokens_per_second, find_best_quantization, infer_model_family_range, rank_compute_candidates
+from dbx_model_planner.engines.score import compute_candidate_score
 
 
 def _default_hosting_mode(workload: WorkloadProfile) -> HostingMode:
@@ -88,6 +89,10 @@ def recommend_compute_for_model(
     )
     enriched_candidates: list[CandidateCompute] = []
     for candidate in candidates:
+        candidate.best_quantization = find_best_quantization(model, candidate.compute)
+        candidate.estimated_tok_s = estimate_tokens_per_second(
+            model, candidate.compute, candidate.recommended_quantization or "fp16",
+        )
         vm_hourly_rate = vm_pricing.get(candidate.compute.node_type_id)
         dbu_hourly_rate = dbu_pricing.get(candidate.compute.node_type_id)
         if vm_hourly_rate is not None:
@@ -98,6 +103,31 @@ def recommend_compute_for_model(
                 pricing_reference="azure_vm_plus_configured_dbu",
             )
         enriched_candidates.append(candidate)
+
+    # Compute composite scores and re-sort by score descending
+    for candidate in enriched_candidates:
+        total_gpu_mem = (candidate.compute.gpu_memory_gb or 0.0) * max(candidate.compute.gpu_count, 1)
+        if candidate.cost:
+            r = candidate.cost.vat_adjusted_hourly_rate
+            cost_per_hour = r if r is not None else candidate.cost.estimated_hourly_rate
+        else:
+            cost_per_hour = None
+        candidate.composite_score = compute_candidate_score(
+            fit_level=candidate.fit_level,
+            estimated_memory_gb=candidate.estimated_memory_gb,
+            total_gpu_memory_gb=total_gpu_mem,
+            estimated_tok_s=candidate.estimated_tok_s,
+            cost_per_hour=cost_per_hour,
+        )
+    # Sort: fitting nodes first (SAFE, BORDERLINE), then by smallest GPU memory.
+    # This puts the smallest viable node at the top.
+    _FIT_ORDER = {FitLevel.SAFE: 0, FitLevel.BORDERLINE: 1, FitLevel.UNLIKELY: 2}
+    enriched_candidates.sort(
+        key=lambda c: (
+            _FIT_ORDER.get(c.fit_level, 9),
+            (c.compute.gpu_memory_gb or 0.0) * max(c.compute.gpu_count, 1),
+        ),
+    )
 
     if enriched_candidates:
         best = enriched_candidates[0]

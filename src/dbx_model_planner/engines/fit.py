@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from math import floor
 
 from dbx_model_planner.domain import (
@@ -49,9 +50,44 @@ QUANTIZATION_BYTES_PER_PARAMETER: dict[str, float] = {
 _KV_BYTES_PER_ELEMENT: float = 2.0  # fp16
 
 
+class KvCacheQuant(Enum):
+    """KV cache quantization mode.
+
+    Controls the precision used for storing the key-value cache during
+    inference.  TurboQuant (3-bit keys + 2-bit values) is a research
+    technique from Google DeepMind that achieves ~5.9× KV cache compression
+    with minimal quality loss.  Requires vLLM + CUDA serving infrastructure.
+
+    Reference: https://github.com/0xSero/turboquant
+    """
+
+    FP16 = "fp16"
+    TURBOQUANT = "turboquant"
+
+    @property
+    def bytes_per_element(self) -> float:
+        """Bytes per KV cache element for this precision."""
+        if self is KvCacheQuant.TURBOQUANT:
+            # ~2.7 bits → 0.34 bytes, aligned with llmfit
+            return 0.34
+        return 2.0  # fp16
+
+    @property
+    def label(self) -> str:
+        if self is KvCacheQuant.TURBOQUANT:
+            return "TurboQuant"
+        return "fp16"
+
+    @property
+    def compression_ratio(self) -> float:
+        """Compression ratio vs fp16 baseline."""
+        return _KV_BYTES_PER_ELEMENT / self.bytes_per_element
+
+
 def _estimate_kv_cache_gb(
     model: ModelProfile,
     context_length: int,
+    kv_quant: KvCacheQuant = KvCacheQuant.FP16,
 ) -> float:
     """Estimate KV cache memory in GB.
 
@@ -60,25 +96,31 @@ def _estimate_kv_cache_gb(
     HuggingFace ``config.json``).  Falls back to a parameter-scaled
     heuristic (aligned with llmfit) when architecture details are missing.
 
+    When *kv_quant* is :attr:`KvCacheQuant.TURBOQUANT`, the KV cache
+    bytes-per-element drops from 2.0 (fp16) to 0.34 (~2.7 bits),
+    reflecting the TurboQuant compression technique.
+
     Precise formula (llmfit):
         kv_bytes = 2 × n_kv_heads × head_dim × context × bytes_per_element × n_layers
         kv_gb = kv_bytes / 2^30
 
     Fallback heuristic (llmfit):
-        kv_gb = params_B × context × 8e-6
+        kv_gb = params_B × context × 8e-6 × (kv_bpe / 2.0)
     """
+    bpe = kv_quant.bytes_per_element
     n_layers = model.num_hidden_layers
     n_kv_heads = model.num_kv_heads
     h_dim = model.head_dim
 
     if n_layers is not None and n_kv_heads is not None and h_dim is not None:
         # Precise formula: 2 (K+V) × kv_heads × head_dim × ctx × bpe × layers
-        kv_bytes = 2 * n_kv_heads * h_dim * context_length * _KV_BYTES_PER_ELEMENT * n_layers
+        kv_bytes = 2 * n_kv_heads * h_dim * context_length * bpe * n_layers
         return kv_bytes / (1024 ** 3)  # bytes → GB
 
-    # Fallback: parameter-scaled heuristic (llmfit)
+    # Fallback: parameter-scaled heuristic (llmfit), scaled by kv quant ratio
     params_b = (model.active_parameter_count or model.parameter_count or 0) / 1e9
-    return max(params_b * context_length * 8e-6, 0.1)
+    ratio = bpe / _KV_BYTES_PER_ELEMENT  # 1.0 for fp16, ~0.17 for TurboQuant
+    return max(params_b * context_length * 8e-6 * ratio, 0.1)
 
 
 @dataclass(slots=True)
@@ -86,6 +128,7 @@ class MemoryEstimate:
     total_gb: float
     kv_cache_gb: float
     runtime_overhead_gb: float
+    incomplete: bool = False
 
 
 def _family_default_quantization(model: ModelProfile) -> str:
@@ -125,10 +168,67 @@ def _bytes_per_parameter(quantization: str | None) -> float:
     )
 
 
+def _estimate_model_weight_gb(
+    model: ModelProfile,
+    parameter_count: int,
+    quantization: str,
+) -> float:
+    """Estimate model weight memory in GB.
+
+    For VLMs with a known ``vision_parameter_count``, the vision encoder is
+    kept at full precision (fp16) and only the text/language portion is
+    quantized.  This matches standard practice — vision encoders (ViT) are
+    more sensitive to quantization than language backbones.
+
+    For all other models (or VLMs without the split data), all parameters
+    are quantized uniformly.
+    """
+    if (
+        model.family == ModelFamily.VLM
+        and model.vision_parameter_count is not None
+        and model.vision_parameter_count > 0
+        and parameter_count > model.vision_parameter_count
+    ):
+        vision_params = model.vision_parameter_count
+        text_params = parameter_count - vision_params
+        # Vision encoder stays at fp16, text portion gets quantized
+        vision_gb = vision_params * _bytes_per_parameter("fp16") / 1_000_000_000
+        text_gb = text_params * _bytes_per_parameter(quantization) / 1_000_000_000
+        return vision_gb + text_gb
+
+    return parameter_count * _bytes_per_parameter(quantization) / 1_000_000_000
+
+
+def estimate_tokens_per_second(
+    model: ModelProfile,
+    node: WorkspaceComputeProfile,
+    quantization: str = "fp16",
+) -> float | None:
+    """Estimate inference tok/s using bandwidth-bound formula.
+
+    Formula: (total_bandwidth / model_size_gb) * efficiency_factor
+    Where efficiency_factor = 0.55 (conservative estimate for autoregressive decoding).
+
+    Returns None if bandwidth data or parameter count is unavailable.
+    """
+    if node.gpu_memory_bandwidth_gb_s is None or node.gpu_count <= 0:
+        return None
+    parameter_count = model.active_parameter_count or model.parameter_count
+    if not parameter_count:
+        return None
+    model_size_gb = _estimate_model_weight_gb(model, parameter_count, quantization)
+    if model_size_gb <= 0:
+        return None
+    total_bandwidth = node.gpu_memory_bandwidth_gb_s * node.gpu_count
+    efficiency_factor = 0.55
+    return (total_bandwidth / model_size_gb) * efficiency_factor
+
+
 def estimate_model_memory_gb(
     model: ModelProfile,
     quantization: str | None = None,
     context_override: int | None = None,
+    kv_quant: KvCacheQuant = KvCacheQuant.FP16,
 ) -> MemoryEstimate:
     quant = quantization or _family_default_quantization(model)
 
@@ -141,17 +241,23 @@ def estimate_model_memory_gb(
             total_gb=round(total, 2),
             kv_cache_gb=0.0,
             runtime_overhead_gb=DEFAULT_RUNTIME_OVERHEAD_GB,
+            incomplete=True,
         )
 
     parameter_count = model.active_parameter_count or model.parameter_count or 0
-    model_gb = parameter_count * _bytes_per_parameter(quant) / 1_000_000_000
+    incomplete = parameter_count == 0
+    model_gb = _estimate_model_weight_gb(model, parameter_count, quant)
 
     if model.family == ModelFamily.LLM:
         context = context_override or model.context_length or DEFAULT_CONTEXT_LENGTH
-        kv_cache_gb = _estimate_kv_cache_gb(model, context)
+        kv_cache_gb = _estimate_kv_cache_gb(model, context, kv_quant=kv_quant)
     elif model.family == ModelFamily.VLM:
         context = context_override or model.context_length or DEFAULT_CONTEXT_LENGTH
-        kv_cache_gb = _estimate_kv_cache_gb(model, context) if model.num_hidden_layers else 0.6
+        kv_cache_gb = (
+            _estimate_kv_cache_gb(model, context, kv_quant=kv_quant)
+            if model.num_hidden_layers
+            else 0.6
+        )
     else:
         kv_cache_gb = 0.2
 
@@ -167,7 +273,32 @@ def estimate_model_memory_gb(
         total_gb=round(total, 2),
         kv_cache_gb=round(kv_cache_gb, 2),
         runtime_overhead_gb=round(runtime_overhead_gb, 2),
+        incomplete=incomplete,
     )
+
+
+def find_best_quantization(
+    model: ModelProfile,
+    node: WorkspaceComputeProfile,
+    context: int | None = None,
+) -> str | None:
+    """Walk from highest quality quant (fp16) down to lowest (q2_k).
+
+    Return the highest quality quantization where the model fits
+    (FitLevel.SAFE or BORDERLINE).  Return None if nothing fits.
+    """
+    from .plan import QUANTIZATION_OPTIONS
+
+    total_gpu_memory_gb = (node.gpu_memory_gb or 0.0) * max(node.gpu_count, 1)
+    if total_gpu_memory_gb <= 0:
+        return None
+
+    for quant in QUANTIZATION_OPTIONS:
+        estimate = estimate_model_memory_gb(model, quant, context_override=context)
+        headroom = total_gpu_memory_gb - estimate.total_gb
+        if headroom >= 0:
+            return quant
+    return None
 
 
 def assess_model_on_compute(
@@ -182,7 +313,14 @@ def assess_model_on_compute(
     if forced_quantization:
         recommended_quantization = forced_quantization
     else:
-        recommended_quantization = _recommended_quantization_for_budget(model, total_gpu_memory_gb)
+        # Use model's native precision instead of auto-selecting quantization
+        native_quant = "fp16"
+        if model.dtype_options:
+            if "bf16" in model.dtype_options:
+                native_quant = "bf16"
+            elif "fp16" in model.dtype_options:
+                native_quant = "fp16"
+        recommended_quantization = native_quant
     estimate = estimate_model_memory_gb(model, recommended_quantization)
 
     notes: list[str] = []
@@ -222,6 +360,7 @@ def assess_model_on_compute(
         recommended_quantization=recommended_quantization,
         estimated_memory_gb=estimate.total_gb,
         estimated_headroom_gb=headroom,
+        estimate_incomplete=estimate.incomplete,
         notes=notes,
     )
 
@@ -264,6 +403,7 @@ def assess_compute_for_models(
                 risk_level=compute_assessment.risk_level,
                 recommended_quantization=compute_assessment.recommended_quantization,
                 estimated_memory_gb=compute_assessment.estimated_memory_gb,
+                estimate_incomplete=compute_assessment.estimate_incomplete,
                 notes=compute_assessment.notes,
             )
         )

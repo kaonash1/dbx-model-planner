@@ -219,22 +219,40 @@ def _build_model_profile(
     # Architecture details for precise KV cache estimation.
     # HuggingFace config.json typically contains num_hidden_layers,
     # num_key_value_heads (GQA), num_attention_heads, hidden_size, head_dim.
-    num_hidden_layers = _as_int(config.get("num_hidden_layers") or config.get("n_layer"))
-    num_attention_heads = _as_int(config.get("num_attention_heads") or config.get("n_head"))
+    # For VLMs, these may be nested under text_config or llm_config.
+    arch_config = config
+    if family is ModelFamily.VLM:
+        # VLMs nest their language-model architecture under text_config,
+        # llm_config, or language_config.  Use that sub-dict for KV cache
+        # estimation (the vision encoder doesn't have a KV cache).
+        for sub_key in ("text_config", "llm_config", "language_config"):
+            sub = config.get(sub_key)
+            if isinstance(sub, dict) and sub:
+                arch_config = sub
+                break
+
+    num_hidden_layers = _as_int(arch_config.get("num_hidden_layers") or arch_config.get("n_layer"))
+    num_attention_heads = _as_int(arch_config.get("num_attention_heads") or arch_config.get("n_head"))
     num_kv_heads = _as_int(
-        config.get("num_key_value_heads")
-        or config.get("num_kv_heads")
-        or config.get("n_head_kv")
+        arch_config.get("num_key_value_heads")
+        or arch_config.get("num_kv_heads")
+        or arch_config.get("n_head_kv")
     )
     # If KV heads not specified, assume MHA (kv_heads = attention_heads)
     if num_kv_heads is None and num_attention_heads is not None:
         num_kv_heads = num_attention_heads
     # head_dim: explicit or derived from hidden_size / num_attention_heads
-    head_dim = _as_int(config.get("head_dim"))
+    head_dim = _as_int(arch_config.get("head_dim"))
     if head_dim is None:
-        hidden_size = _as_int(config.get("hidden_size") or config.get("n_embd") or config.get("d_model"))
+        hidden_size = _as_int(arch_config.get("hidden_size") or arch_config.get("n_embd") or arch_config.get("d_model"))
         if hidden_size and num_attention_heads:
             head_dim = hidden_size // num_attention_heads
+
+    # VLM-specific: estimate vision encoder parameter count so fit engine
+    # can apply quantization only to the text/language portion.
+    vision_parameter_count: int | None = None
+    if family is ModelFamily.VLM:
+        vision_parameter_count = _estimate_vision_encoder_params(config)
 
     dtype_options = _collect_dtypes(config, metadata.tags)
     quantization_options = _collect_quantization_options(config, metadata.tags)
@@ -274,6 +292,7 @@ def _build_model_profile(
         num_hidden_layers=num_hidden_layers,
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
+        vision_parameter_count=vision_parameter_count,
         dtype_options=dtype_options,
         quantization_options=quantization_options,
         capabilities=capabilities,
@@ -388,6 +407,51 @@ def _collect_quantization_options(config: Mapping[str, Any], tags: Iterable[str]
         if tag in {"gptq", "awq", "bnb", "bitsandbytes", "int8", "int4"}:
             options.add(tag)
     return sorted(options)
+
+
+def _estimate_vision_encoder_params(config: Mapping[str, Any]) -> int | None:
+    """Estimate the vision encoder parameter count from a VLM config.
+
+    VLM configs on HuggingFace typically nest vision encoder details under
+    ``vision_config``.  We look for:
+    1. An explicit ``num_parameters`` key inside ``vision_config``.
+    2. A rough estimate based on hidden_size, num_layers, and intermediate_size
+       (accounts for self-attention + MLP blocks of a ViT encoder).
+
+    Returns ``None`` if insufficient metadata is available to estimate.
+    """
+    vc = config.get("vision_config")
+    if not isinstance(vc, dict) or not vc:
+        return None
+
+    # Explicit count wins
+    explicit = _as_int(vc.get("num_parameters") or vc.get("parameter_count"))
+    if explicit and explicit > 0:
+        return explicit
+
+    # ViT-style estimation: each transformer layer has:
+    #   - Self-attention: 4 * hidden^2  (Q, K, V, O projections)
+    #   - MLP: 2 * hidden * intermediate  (up + down projections)
+    #   - Plus layer norms (small, ignored)
+    # Plus patch embedding: ~hidden * (patch_size^2 * channels) ≈ negligible
+    hidden = _as_int(vc.get("hidden_size"))
+    layers = _as_int(vc.get("num_hidden_layers") or vc.get("num_layers") or vc.get("depth"))
+    intermediate = _as_int(vc.get("intermediate_size"))
+
+    if hidden and layers:
+        attention_params = 4 * hidden * hidden  # Q, K, V, O
+        if intermediate:
+            mlp_params = 2 * hidden * intermediate
+        else:
+            # Default ViT MLP ratio is 4x hidden
+            mlp_params = 2 * hidden * (4 * hidden)
+        per_layer = attention_params + mlp_params
+        total = per_layer * layers
+        # Add embedding layer (patch + position) — rough estimate
+        total += hidden * hidden  # approximate patch embedding
+        return total
+
+    return None
 
 
 def _collect_capabilities(metadata: HuggingFaceRepoMetadata, family: ModelFamily, modality: ModelModality) -> list[str]:

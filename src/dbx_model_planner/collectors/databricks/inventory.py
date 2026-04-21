@@ -44,6 +44,19 @@ _GPU_MEMORY_MAP: dict[str, float] = {
     "L40S": 48.0,
 }
 
+# Known GPU memory bandwidth (GB/s) for common GPU SKUs.
+_GPU_BANDWIDTH_MAP: dict[str, float] = {
+    "K80":      240.0,
+    "T4":       320.0,
+    "V100":     900.0,
+    "A10":      600.0,
+    "A100_40": 1555.0,
+    "A100_80": 2039.0,
+    "H100":    3350.0,
+    "L4":       300.0,
+    "L40S":     864.0,
+}
+
 # Patterns to extract GPU family from Azure node type IDs.
 # Order matters: more specific patterns first, catch-all last.
 _GPU_PATTERNS: list[tuple[str, str]] = [
@@ -155,12 +168,22 @@ class DatabricksInventoryCollector:
             num_gpus = item.get("num_gpus", 0)
             num_cores = item.get("num_cores")
 
+            gpu_family = _extract_gpu_family(node_type_id)
+            gpu_mem_per_gpu = _extract_gpu_memory(node_type_id, num_gpus)
+
+            # Resolve bandwidth lookup key (A100 needs memory-size disambiguation)
+            bw_key = gpu_family
+            if gpu_family and "A100" in gpu_family and gpu_mem_per_gpu is not None:
+                bw_key = "A100_80" if gpu_mem_per_gpu >= 80 else "A100_40"
+            gpu_bandwidth = _GPU_BANDWIDTH_MAP.get(bw_key) if bw_key else None
+
             node_types.append(WorkspaceComputeProfile(
                 node_type_id=node_type_id,
                 cloud=Cloud.AZURE,
-                gpu_family=_extract_gpu_family(node_type_id),
+                gpu_family=gpu_family,
                 gpu_count=num_gpus,
-                gpu_memory_gb=_extract_gpu_memory(node_type_id, num_gpus),
+                gpu_memory_gb=gpu_mem_per_gpu,
+                gpu_memory_bandwidth_gb_s=gpu_bandwidth,
                 vcpu_count=num_cores,
                 memory_gb=item.get("memory_mb", 0) / 1024 if item.get("memory_mb") else None,
                 dbu_per_hour=None,  # Set later from Azure pricing page data

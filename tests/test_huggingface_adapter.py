@@ -261,5 +261,110 @@ class InferredQuantizationTest(unittest.TestCase):
         self.assertIn("int4", normalized.model_profile.quantization_options)
 
 
+class VlmVisionConfigExtractionTest(unittest.TestCase):
+    """Test VLM-specific vision_config and text_config parsing."""
+
+    def test_extracts_vision_params_from_vision_config(self) -> None:
+        """vision_parameter_count should be estimated from vision_config."""
+        data = {
+            "repository_id": "test/vlm-with-vision-config",
+            "pipeline_tag": "image-text-to-text",
+            "tags": ["vlm", "multimodal"],
+            "siblings": [
+                {"rfilename": "config.json"},
+                {"rfilename": "preprocessor_config.json"},
+                {"rfilename": "model.safetensors"},
+            ],
+            "config": {
+                "architectures": ["LlavaForConditionalGeneration"],
+                "vision_config": {
+                    "hidden_size": 1024,
+                    "intermediate_size": 4096,
+                    "num_hidden_layers": 24,
+                },
+                "text_config": {
+                    "num_hidden_layers": 32,
+                    "num_attention_heads": 32,
+                    "num_key_value_heads": 8,
+                    "hidden_size": 4096,
+                },
+                "num_parameters": 8000000000,
+                "max_position_embeddings": 8192,
+            },
+            "processor": {"image_processor_type": "CLIPImageProcessor"},
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        profile = normalized.model_profile
+
+        self.assertEqual(profile.family, ModelFamily.VLM)
+        self.assertIsNotNone(profile.vision_parameter_count)
+        self.assertGreater(profile.vision_parameter_count, 0)
+
+        # Architecture details should come from text_config, not top-level
+        self.assertEqual(profile.num_hidden_layers, 32)
+        self.assertEqual(profile.num_kv_heads, 8)
+        self.assertEqual(profile.head_dim, 128)  # 4096 / 32
+
+    def test_text_config_overrides_top_level_for_vlm(self) -> None:
+        """For VLMs, architecture details from text_config take precedence."""
+        data = {
+            "repository_id": "test/vlm-nested-config",
+            "pipeline_tag": "image-text-to-text",
+            "tags": ["vlm"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["LlavaForConditionalGeneration"],
+                "num_hidden_layers": 24,  # Vision layers at top level
+                "vision_config": {"hidden_size": 1024, "num_hidden_layers": 24},
+                "text_config": {
+                    "num_hidden_layers": 32,  # Text layers in sub-config
+                    "num_attention_heads": 32,
+                    "hidden_size": 4096,
+                },
+            },
+            "processor": {"image_processor_type": "CLIPImageProcessor"},
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        # Should use text_config.num_hidden_layers (32), not top-level (24)
+        self.assertEqual(normalized.model_profile.num_hidden_layers, 32)
+
+    def test_no_vision_config_returns_none(self) -> None:
+        """VLM without vision_config should have no vision_parameter_count."""
+        data = vlm_fixture()
+        # The fixture has a minimal vision_config without enough info to estimate
+        # (no hidden_size or num_hidden_layers for estimation)
+        data["config"] = {  # type: ignore[index]
+            "architectures": ["VisionEncoderDecoderModel"],
+            "max_position_embeddings": 77,
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        self.assertIsNone(normalized.model_profile.vision_parameter_count)
+
+    def test_llm_config_key_used_for_arch(self) -> None:
+        """Some VLMs use 'llm_config' instead of 'text_config'."""
+        data = {
+            "repository_id": "test/vlm-llm-config",
+            "pipeline_tag": "image-text-to-text",
+            "tags": ["vlm"],
+            "siblings": [{"rfilename": "model.safetensors"}],
+            "config": {
+                "architectures": ["InternVLChatModel"],
+                "vision_config": {"hidden_size": 1024, "num_hidden_layers": 24},
+                "llm_config": {
+                    "num_hidden_layers": 40,
+                    "num_attention_heads": 40,
+                    "num_key_value_heads": 8,
+                    "hidden_size": 5120,
+                },
+            },
+            "processor": {"image_processor_type": "CLIPImageProcessor"},
+        }
+        normalized = normalize_huggingface_repo_metadata(data)
+        # Should pick up from llm_config
+        self.assertEqual(normalized.model_profile.num_hidden_layers, 40)
+        self.assertEqual(normalized.model_profile.num_kv_heads, 8)
+        self.assertEqual(normalized.model_profile.head_dim, 128)  # 5120 / 40
+
+
 if __name__ == "__main__":
     unittest.main()

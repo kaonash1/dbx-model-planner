@@ -12,6 +12,7 @@ from dbx_model_planner.config import (
     _WORKLOAD_CYCLE,
     load_app_config,
     render_default_config_template,
+    save_pricing_config,
 )
 
 
@@ -127,6 +128,73 @@ class WorkloadTypeTests(unittest.TestCase):
     def test_template_contains_workload_type(self) -> None:
         template = render_default_config_template()
         self.assertIn("workload_type", template)
+
+
+class SavePricingConfigTests(unittest.TestCase):
+    """Tests for save_pricing_config()."""
+
+    def test_creates_new_config_file(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "sub" / "config.toml"
+            result = save_pricing_config(
+                azure_region="westeurope",
+                discount_rate=0.375,
+                vat_rate=0.19,
+                config_path=config_path,
+            )
+            self.assertEqual(result, config_path)
+            self.assertTrue(config_path.exists())
+
+            config = load_app_config(config_path=config_path, env={})
+            self.assertEqual(config.pricing.azure_region, "westeurope")
+            self.assertAlmostEqual(config.pricing.discount_rate, 0.375)
+            self.assertAlmostEqual(config.pricing.vat_rate, 0.19)
+
+    def test_updates_existing_config_file(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.toml"
+            config_path.write_text(
+                '[pricing]\nazure_region = "eastus"\ndiscount_rate = 0.1\nvat_rate = 0.05\n',
+                encoding="utf-8",
+            )
+            save_pricing_config(
+                azure_region="westus2",
+                discount_rate=0.25,
+                vat_rate=0.2,
+                config_path=config_path,
+            )
+            config = load_app_config(config_path=config_path, env={})
+            self.assertEqual(config.pricing.azure_region, "westus2")
+            self.assertAlmostEqual(config.pricing.discount_rate, 0.25)
+            self.assertAlmostEqual(config.pricing.vat_rate, 0.2)
+
+    def test_preserves_other_sections(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.toml"
+            config_path.write_text(
+                '[pricing]\nazure_region = "eastus"\ndiscount_rate = 0.0\nvat_rate = 0.0\n\n'
+                "[databricks]\ndbu_rate_per_unit = 0.30\n",
+                encoding="utf-8",
+            )
+            save_pricing_config(
+                azure_region="westeurope",
+                discount_rate=0.375,
+                vat_rate=0.19,
+                config_path=config_path,
+            )
+            config = load_app_config(config_path=config_path, env={})
+            self.assertEqual(config.pricing.azure_region, "westeurope")
+            # Other section should be preserved
+            self.assertEqual(config.databricks.dbu_rate_per_unit, 0.30)
+
+    def test_zero_defaults(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.toml"
+            save_pricing_config(config_path=config_path)
+            config = load_app_config(config_path=config_path, env={})
+            self.assertEqual(config.pricing.azure_region, "")
+            self.assertEqual(config.pricing.discount_rate, 0.0)
+            self.assertEqual(config.pricing.vat_rate, 0.0)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from ..domain import (
     WorkspaceComputeProfile,
     WorkspaceInventorySnapshot,
 )
-from ..engines.fit import estimate_model_memory_gb, MemoryEstimate
+from ..engines.fit import estimate_model_memory_gb, KvCacheQuant, MemoryEstimate
 from ..engines.plan import QUANTIZATION_OPTIONS, CONTEXT_PRESETS
 from .state import (
     FIT_FILTER_LABELS,
@@ -191,7 +191,7 @@ def _render_footer(state: TuiState) -> Text:
 
     if state.view == View.INVENTORY:
         cpu_label = "CPU on" if state.show_cpu_nodes else "CPU off"
-        price_hint = f"[{ACCENT}]$[/{ACCENT}] refresh prices  " if state.pricing_loaded or state.pricing_error else f"[{ACCENT}]$[/{ACCENT}] fetch prices  "
+        price_hint = f"[{ACCENT}]$[/{ACCENT}] reconfigure prices  " if state.pricing_loaded or state.pricing_error else f"[{ACCENT}]$[/{ACCENT}] pricing setup  "
         try:
             wt_short = "AP" if WorkloadType(state.workload_type) == WorkloadType.ALL_PURPOSE else "JC"
         except ValueError:
@@ -245,11 +245,12 @@ def _render_footer(state: TuiState) -> Text:
             wt_short = "AP" if WorkloadType(state.workload_type) == WorkloadType.ALL_PURPOSE else "JC"
         except ValueError:
             wt_short = "?"
+        tq = f"[green]ON[/green]" if state.whatif_turboquant else "off"
         return Text.from_markup(
             f"  [{ACCENT}]←/→[/{ACCENT}] change {selector}  "
             f"[{ACCENT}]Tab[/{ACCENT}] toggle selector  "
-            f"[{ACCENT}]j/k[/{ACCENT}] nav table  "
-            f"[{ACCENT}]PgUp/Dn[/{ACCENT}] page  "
+            f"[{ACCENT}]K[/{ACCENT}] TurboQuant [{MUTED}]{tq}[/{MUTED}]  "
+            f"[{ACCENT}]j/k[/{ACCENT}] nav  "
             f"[{ACCENT}]t[/{ACCENT}] [{MUTED}]{wt_short}[/{MUTED}]  "
             f"[{ACCENT}]Esc[/{ACCENT}] back  "
             f"[{ACCENT}]q[/{ACCENT}] quit"
@@ -347,7 +348,8 @@ def _render_inventory_table(state: TuiState, max_rows: int) -> Panel:
         node = nodes[i]
         is_selected = i == state.selected_index
 
-        gpu_mem = f"{node.gpu_memory_gb:.0f} GB" if node.gpu_memory_gb else "-"
+        total_gpu_mem = (node.gpu_memory_gb or 0.0) * max(node.gpu_count, 1) if node.gpu_memory_gb else 0.0
+        gpu_mem = f"{total_gpu_mem:.0f} GB" if total_gpu_mem else "-"
         ram = f"{node.memory_gb:.0f} GB" if node.memory_gb else "-"
         vcpu = str(node.vcpu_count) if node.vcpu_count else "-"
         gpu_family = node.gpu_family or ("-" if node.gpu_count == 0 else "?")
@@ -412,7 +414,11 @@ def _render_node_sidebar(node: WorkspaceComputeProfile, state: TuiState) -> Pane
     lines.append(f"  [{MUTED}]GPU count[/{MUTED}]     [{BRIGHT}]{node.gpu_count}[/{BRIGHT}]")
     lines.append(f"  [{MUTED}]GPU family[/{MUTED}]    [{BRIGHT}]{node.gpu_family or 'none'}[/{BRIGHT}]")
     gpu_mem = f"{node.gpu_memory_gb:.0f} GB" if node.gpu_memory_gb else "-"
-    lines.append(f"  [{MUTED}]GPU memory[/{MUTED}]    [{BRIGHT}]{gpu_mem}[/{BRIGHT}]")
+    total_gpu_mem = ""
+    if node.gpu_memory_gb and node.gpu_count > 1:
+        total = node.gpu_memory_gb * node.gpu_count
+        total_gpu_mem = f"  [{DIM}]({total:.0f} GB total)[/{DIM}]"
+    lines.append(f"  [{MUTED}]GPU memory[/{MUTED}]    [{BRIGHT}]{gpu_mem}[/{BRIGHT}]{total_gpu_mem}")
     lines.append(f"  [{MUTED}]vCPU[/{MUTED}]          [{BRIGHT}]{node.vcpu_count or '-'}[/{BRIGHT}]")
     ram = f"{node.memory_gb:.0f} GB" if node.memory_gb else "-"
     lines.append(f"  [{MUTED}]System RAM[/{MUTED}]    [{BRIGHT}]{ram}[/{BRIGHT}]")
@@ -452,8 +458,8 @@ def _render_node_sidebar(node: WorkspaceComputeProfile, state: TuiState) -> Pane
             discounted = total * (1.0 - discount)
             with_vat = discounted * (1.0 + vat)
             lines.append(f"  [{MUTED}]Total[/{MUTED}]         [{BRIGHT}]${total:.2f}/hr[/{BRIGHT}]")
-            lines.append(f"  [{MUTED}]Discounted[/{MUTED}]    [{BRIGHT}]${discounted:.2f}/hr[/{BRIGHT}]")
-            lines.append(f"  [{MUTED}]+ VAT[/{MUTED}]         [{DIM}]${with_vat:.2f}/hr[/{DIM}]")
+            lines.append(f"  [{MUTED}]Total*[/{MUTED}]        [{BRIGHT}]${with_vat:.2f}/hr[/{BRIGHT}]")
+            lines.append(f"  [{DIM}]* discount and VAT applied[/{DIM}]")
 
     # Runtimes section
     if state.inventory and state.inventory.runtimes:
@@ -547,11 +553,11 @@ def _render_browse_table(state: TuiState, max_rows: int) -> Panel:
         show_header=True,
         header_style=MUTED,
     )
-    table.add_column("Model", min_width=36, style=BRIGHT)
+    table.add_column("Model", min_width=36, style=BRIGHT, no_wrap=True, overflow="ellipsis")
     table.add_column("Params", justify="right", width=8, style=MUTED)
     table.add_column("Type", width=10)
     table.add_column("Provider", width=10, style=DIM)
-    table.add_column("Use Case", min_width=20, style=DIM)
+    table.add_column("Use Case", min_width=20, style=DIM, no_wrap=True, overflow="ellipsis")
 
     # Visible window
     state.browse_scroll_offset, start, end = state.compute_scroll_window(
@@ -572,8 +578,6 @@ def _render_browse_table(state: TuiState, max_rows: int) -> Panel:
         name = e.model_id
         if e.discovered:
             name = f"{name} [{DIM}]*[/{DIM}]"
-        if e.gated:
-            name = f"{name} [{DIM}]G[/{DIM}]"
 
         table.add_row(
             f"{prefix} {name}",
@@ -696,7 +700,7 @@ def _render_model_fit_layout(state: TuiState, body_height: int) -> Layout:
         layout = Layout()
         layout.split_row(
             Layout(name="table", ratio=3),
-            Layout(name="detail", ratio=2),
+            Layout(name="detail", ratio=1),
         )
         layout["table"].update(_render_model_fit_table(state, body_height))
         layout["detail"].update(_render_candidate_sidebar(candidate, state))
@@ -738,11 +742,11 @@ def _render_model_fit_table(state: TuiState, max_rows: int) -> Panel:
     )
     table.add_column("Node Type", min_width=24, style=BRIGHT)
     table.add_column("Fit", width=11)
-    table.add_column("Quant", width=7, style=MUTED)
-    table.add_column("Est.", justify="right", width=8, style=MUTED)
     table.add_column("Headroom", justify="right", width=9, style=MUTED)
     table.add_column("GPU Mem", justify="right", width=8, style=DIM)
     table.add_column("GPUs", justify="center", width=5, style=DIM)
+    table.add_column("Mem%", justify="right", width=5, style=MUTED)
+    table.add_column("Est. tok/s", justify="right", width=10, style=DIM)
     if state.pricing_loaded:
         table.add_column("$/hr", justify="right", width=7, style=MUTED)
 
@@ -774,21 +778,42 @@ def _render_model_fit_table(state: TuiState, max_rows: int) -> Panel:
         fit_color = FIT_COLORS.get(c.fit_level, MUTED)
         fit_text = f"[{fit_color}]{c.fit_level.value}[/{fit_color}]"
         headroom = f"{c.estimated_headroom_gb:+.1f} GB" if c.estimated_headroom_gb is not None else "-"
-        est_mem = f"{c.estimated_memory_gb:.1f} GB" if c.estimated_memory_gb else "-"
-        gpu_mem = f"{c.compute.gpu_memory_gb:.0f} GB" if c.compute.gpu_memory_gb else "-"
+        total_gpu_mem = (c.compute.gpu_memory_gb or 0.0) * max(c.compute.gpu_count, 1) if c.compute.gpu_memory_gb else 0.0
+        gpu_mem = f"{total_gpu_mem:.0f} GB" if total_gpu_mem else "-"
 
         style = SELECTED_STYLE if is_selected else ""
         prefix = ">" if is_selected else " "
 
         row = [
             f"{prefix} {c.compute.node_type_id}",
+        ]
+
+        row += [
             fit_text,
-            c.recommended_quantization or "-",
-            est_mem,
             headroom,
             gpu_mem,
             str(c.compute.gpu_count),
         ]
+
+        # Memory usage %
+        if total_gpu_mem > 0 and c.estimated_memory_gb and not c.estimate_incomplete:
+            mem_pct = (c.estimated_memory_gb / total_gpu_mem) * 100
+            if mem_pct < 70:
+                pct_color = "green"
+            elif mem_pct <= 85:
+                pct_color = "yellow"
+            else:
+                pct_color = "red"
+            row.append(f"[{pct_color}]{mem_pct:.0f}%[/{pct_color}]")
+        else:
+            row.append("-")
+
+        # Estimated tok/s
+        if c.estimated_tok_s is not None:
+            row.append(f"~{c.estimated_tok_s:,.0f}")
+        else:
+            row.append("-")
+
         if state.pricing_loaded:
             if c.cost and c.cost.vat_adjusted_hourly_rate is not None:
                 row.append(f"{c.cost.vat_adjusted_hourly_rate:.2f}")
@@ -848,13 +873,29 @@ def _render_candidate_sidebar(candidate: CandidateCompute, state: TuiState) -> P
     # Fit info
     lines.append(f"  [{MUTED}]Fit[/{MUTED}]           [{fit_color}]{c.fit_level.value}[/{fit_color}]")
     lines.append(f"  [{MUTED}]Risk[/{MUTED}]          [{BRIGHT}]{c.risk_level.value}[/{BRIGHT}]")
-    lines.append(f"  [{MUTED}]Quantization[/{MUTED}]  [{BRIGHT}]{c.recommended_quantization or '-'}[/{BRIGHT}]")
+    lines.append(f"  [{MUTED}]Precision[/{MUTED}]     [{BRIGHT}]{c.recommended_quantization or 'fp16'}[/{BRIGHT}]")
 
-    est = f"{c.estimated_memory_gb:.1f} GB" if c.estimated_memory_gb else "-"
+    est = "? (insufficient metadata)" if c.estimate_incomplete else (f"{c.estimated_memory_gb:.1f} GB" if c.estimated_memory_gb else "-")
     lines.append(f"  [{MUTED}]Est. memory[/{MUTED}]   [{BRIGHT}]{est}[/{BRIGHT}]")
 
     headroom = f"{c.estimated_headroom_gb:+.1f} GB" if c.estimated_headroom_gb is not None else "-"
     lines.append(f"  [{MUTED}]Headroom[/{MUTED}]      [{BRIGHT}]{headroom}[/{BRIGHT}]")
+
+    # Memory usage percentage
+    total_gpu_mem_sidebar = (c.compute.gpu_memory_gb or 0.0) * max(c.compute.gpu_count, 1) if c.compute.gpu_memory_gb else 0.0
+    if total_gpu_mem_sidebar > 0 and c.estimated_memory_gb and not c.estimate_incomplete:
+        usage_pct = (c.estimated_memory_gb / total_gpu_mem_sidebar) * 100
+        if usage_pct < 70:
+            pct_color = "green"
+        elif usage_pct <= 85:
+            pct_color = "yellow"
+        else:
+            pct_color = "red"
+        lines.append(f"  [{MUTED}]Mem Usage[/{MUTED}]     [{pct_color}]{usage_pct:.0f}%[/{pct_color}]")
+
+    # Estimated tok/s
+    if c.estimated_tok_s is not None:
+        lines.append(f"  [{MUTED}]Est. tok/s[/{MUTED}]    [{BRIGHT}]~{c.estimated_tok_s:,.0f}[/{BRIGHT}]")
 
     # Context length from model profile
     if state.model_profile:
@@ -862,13 +903,21 @@ def _render_candidate_sidebar(candidate: CandidateCompute, state: TuiState) -> P
         if native_ctx:
             lines.append(f"  [{MUTED}]Context[/{MUTED}]       [{BRIGHT}]{native_ctx:,}[/{BRIGHT}]")
 
+    if state.model_gated:
+        lines.append("")
+        lines.append(f"  [{DIM}]Gated repo - HF token required[/{DIM}]")
+
     # Hardware
     lines.append("")
     lines.append(f"  [{ACCENT}]Hardware[/{ACCENT}]")
     lines.append(f"  [{MUTED}]GPU count[/{MUTED}]     [{BRIGHT}]{c.compute.gpu_count}[/{BRIGHT}]")
     lines.append(f"  [{MUTED}]GPU family[/{MUTED}]    [{BRIGHT}]{c.compute.gpu_family or '-'}[/{BRIGHT}]")
     gpu_mem = f"{c.compute.gpu_memory_gb:.0f} GB" if c.compute.gpu_memory_gb else "-"
-    lines.append(f"  [{MUTED}]GPU memory[/{MUTED}]    [{BRIGHT}]{gpu_mem}[/{BRIGHT}]")
+    total_gpu_mem = ""
+    if c.compute.gpu_memory_gb and c.compute.gpu_count > 1:
+        total = c.compute.gpu_memory_gb * c.compute.gpu_count
+        total_gpu_mem = f"  [{DIM}]({total:.0f} GB total)[/{DIM}]"
+    lines.append(f"  [{MUTED}]GPU memory[/{MUTED}]    [{BRIGHT}]{gpu_mem}[/{BRIGHT}]{total_gpu_mem}")
 
     # Cost
     if c.cost is not None:
@@ -885,10 +934,9 @@ def _render_candidate_sidebar(candidate: CandidateCompute, state: TuiState) -> P
             )
         if c.cost.estimated_hourly_rate is not None:
             lines.append(f"  [{MUTED}]Total[/{MUTED}]         [{BRIGHT}]${c.cost.estimated_hourly_rate:.2f}/hr[/{BRIGHT}]")
-        if c.cost.discounted_hourly_rate is not None:
-            lines.append(f"  [{MUTED}]Discounted[/{MUTED}]    [{BRIGHT}]${c.cost.discounted_hourly_rate:.2f}/hr[/{BRIGHT}]")
         if c.cost.vat_adjusted_hourly_rate is not None:
-            lines.append(f"  [{MUTED}]+ VAT[/{MUTED}]         [{DIM}]${c.cost.vat_adjusted_hourly_rate:.2f}/hr[/{DIM}]")
+            lines.append(f"  [{MUTED}]Total*[/{MUTED}]        [{BRIGHT}]${c.cost.vat_adjusted_hourly_rate:.2f}/hr[/{BRIGHT}]")
+            lines.append(f"  [{DIM}]* discount and VAT applied[/{DIM}]")
     elif c.compute.dbu_per_hour is not None:
         lines.append("")
         lines.append(f"  [{ACCENT}]DBU[/{ACCENT}]")
@@ -1039,7 +1087,18 @@ def _render_whatif_view(state: TuiState, body_height: int) -> Panel:
     )
     lines.append("")
 
+    # -- VLM note
+    is_vlm = model.family == ModelFamily.VLM
+    if is_vlm:
+        lines.append(
+            f"  [italic dim]Note: Vision encoder stays at fp16. "
+            f"Quantization applies to language backbone only.[/italic dim]"
+        )
+        lines.append("")
+
     # -- Quant selector bar
+    quant_label = "Lang Quant:" if is_vlm else "Quant:"
+    quant_pad = "  " if is_vlm else "   "
     quant_active = state.whatif_selector_row == 0
     quant_indicator = f"[{ACCENT}]>[/{ACCENT}]" if quant_active else f"[{DIM}] [/{DIM}]"
     quant_parts: list[str] = []
@@ -1049,7 +1108,7 @@ def _render_whatif_view(state: TuiState, body_height: int) -> Panel:
         else:
             quant_parts.append(f"[{MUTED}]{q}[/{MUTED}]")
     lines.append(
-        f"  {quant_indicator} [{DIM}]Quant:[/{DIM}]   "
+        f"  {quant_indicator} [{DIM}]{quant_label}[/{DIM}]{quant_pad}"
         + "  ".join(quant_parts)
     )
 
@@ -1069,18 +1128,37 @@ def _render_whatif_view(state: TuiState, body_height: int) -> Panel:
     )
     lines.append("")
 
+    # -- TurboQuant KV cache toggle
+    kv_quant = KvCacheQuant.TURBOQUANT if state.whatif_turboquant else KvCacheQuant.FP16
+    if state.whatif_turboquant:
+        tq_badge = f"[{ACCENT_BOLD}]\\[TurboQuant ON][/{ACCENT_BOLD}]"
+        tq_note = f"  [{DIM}]KV cache ~{kv_quant.compression_ratio:.1f}× compressed (3b keys + 2b values)[/{DIM}]"
+    else:
+        tq_badge = f"[{DIM}]\\[TurboQuant off][/{DIM}]"
+        tq_note = ""
+    lines.append(f"  [{DIM}]KV Cache:[/{DIM}]  {tq_badge}{tq_note}")
+    lines.append("")
+
     # -- Estimate summary for current selection
     est = estimate_model_memory_gb(
         model, selected_quant,
         context_override=selected_ctx if state.whatif_ctx_index > 0 else None,
+        kv_quant=kv_quant,
     )
-    lines.append(
-        f"  [{DIM}]Selected:[/{DIM}] [{BRIGHT}]{selected_quant}[/{BRIGHT}]  "
-        f"[{DIM}]ctx:[/{DIM}] [{BRIGHT}]{ctx_label}[/{BRIGHT}]  "
-        f"[{DIM}]est:[/{DIM}] [{BRIGHT}]{est.total_gb:.1f} GB[/{BRIGHT}]  "
-        f"[{DIM}](model {est.total_gb - est.kv_cache_gb - est.runtime_overhead_gb:.1f} + "
-        f"kv {est.kv_cache_gb:.1f} + rt {est.runtime_overhead_gb:.1f})[/{DIM}]"
-    )
+    if est.incomplete:
+        lines.append(
+            f"  [{DIM}]Selected:[/{DIM}] [{BRIGHT}]{selected_quant}[/{BRIGHT}]  "
+            f"[{DIM}]ctx:[/{DIM}] [{BRIGHT}]{ctx_label}[/{BRIGHT}]  "
+            f"[{DIM}]est:[/{DIM}] [{BRIGHT}]? (insufficient metadata)[/{BRIGHT}]"
+        )
+    else:
+        lines.append(
+            f"  [{DIM}]Selected:[/{DIM}] [{BRIGHT}]{selected_quant}[/{BRIGHT}]  "
+            f"[{DIM}]ctx:[/{DIM}] [{BRIGHT}]{ctx_label}[/{BRIGHT}]  "
+            f"[{DIM}]est:[/{DIM}] [{BRIGHT}]{est.total_gb:.1f} GB[/{BRIGHT}]  "
+            f"[{DIM}](model {est.total_gb - est.kv_cache_gb - est.runtime_overhead_gb:.1f} + "
+            f"kv {est.kv_cache_gb:.1f} + rt {est.runtime_overhead_gb:.1f})[/{DIM}]"
+        )
     lines.append("")
 
     # -- Build the fit table for all GPU nodes with the selected quant/ctx
@@ -1104,10 +1182,11 @@ def _render_whatif_view(state: TuiState, body_height: int) -> Panel:
     )
     table.add_column("Node Type", min_width=24, style=BRIGHT)
     table.add_column("Fit", width=11)
-    table.add_column("Est. VRAM", justify="right", width=10, style=MUTED)
     table.add_column("Headroom", justify="right", width=9, style=MUTED)
     table.add_column("GPU Mem", justify="right", width=8, style=DIM)
     table.add_column("GPUs", justify="center", width=5, style=DIM)
+    table.add_column("Mem%", justify="right", width=5, style=MUTED)
+    table.add_column("Est. tok/s", justify="right", width=10, style=DIM)
     if state.pricing_loaded:
         table.add_column("$/hr", justify="right", width=7, style=MUTED)
 
@@ -1138,9 +1217,30 @@ def _render_whatif_view(state: TuiState, body_height: int) -> Panel:
 
         fit_color = FIT_COLORS.get(fit_level, MUTED)
         fit_text = f"[{fit_color}]{fit_level.value}[/{fit_color}]"
-        headroom_str = f"{headroom:+.1f} GB"
-        est_str = f"{est.total_gb:.1f} GB"
-        gpu_mem = f"{node.gpu_memory_gb:.0f} GB" if node.gpu_memory_gb else "-"
+        headroom_str = "?" if est.incomplete else f"{headroom:+.1f} GB"
+        total_gpu_mem = (node.gpu_memory_gb or 0.0) * max(node.gpu_count, 1) if node.gpu_memory_gb else 0.0
+        gpu_mem = f"{total_gpu_mem:.0f} GB" if total_gpu_mem else "-"
+
+        # Memory usage %
+        if total_gpu_mem > 0 and not est.incomplete:
+            mem_pct = (est.total_gb / total_gpu_mem) * 100
+            if mem_pct < 70:
+                pct_color = "green"
+            elif mem_pct <= 85:
+                pct_color = "yellow"
+            else:
+                pct_color = "red"
+            mem_pct_str = f"[{pct_color}]{mem_pct:.0f}%[/{pct_color}]"
+        else:
+            mem_pct_str = "-"
+
+        # Estimated tok/s
+        if not est.incomplete and model.parameter_count and node.gpu_memory_bandwidth_gb_s:
+            from ..engines.fit import estimate_tokens_per_second
+            tps = estimate_tokens_per_second(model, node, selected_quant)
+            tok_str = f"~{tps:,.0f}" if tps is not None else "-"
+        else:
+            tok_str = "-"
 
         style = SELECTED_STYLE if is_selected else ""
         prefix = ">" if is_selected else " "
@@ -1148,10 +1248,11 @@ def _render_whatif_view(state: TuiState, body_height: int) -> Panel:
         row = [
             f"{prefix} {node.node_type_id}",
             fit_text,
-            est_str,
             headroom_str,
             gpu_mem,
             str(node.gpu_count),
+            mem_pct_str,
+            tok_str,
         ]
         if state.pricing_loaded:
             total = _node_total_hourly(

@@ -6,6 +6,7 @@ from typing import Callable
 
 from .credentials import DatabricksCredentials, HuggingFaceCredentials
 from .keyring import KeyringNotAvailableError, credential_exists, delete_credential, load_credential, save_credential
+from ..config import save_pricing_config
 
 InputFn = Callable[[str], str]
 OutputFn = Callable[[str], None]
@@ -185,6 +186,52 @@ def _prompt_azure_region(
         output_fn("")
 
 
+def _prompt_pricing_config(
+    input_fn: InputFn,
+    output_fn: OutputFn,
+) -> tuple[float, float]:
+    """Prompt for enterprise discount and VAT rates.
+
+    Returns (discount_rate, vat_rate) as fractions (e.g. 0.375, 0.19).
+    """
+    output_fn("")
+    output_fn("=== Pricing Configuration ===")
+    output_fn("")
+    output_fn("Enter your enterprise discount and VAT rates.")
+    output_fn("These are saved to config.toml and applied to all price calculations.")
+    output_fn("Press Enter to skip (defaults to 0%).")
+    output_fn("")
+
+    # Discount
+    discount_input = input_fn("Discount % (e.g. 37.5)> ").strip()
+    if discount_input:
+        try:
+            discount_rate = float(discount_input) / 100.0
+        except ValueError:
+            output_fn("  Invalid number, defaulting to 0%.")
+            discount_rate = 0.0
+    else:
+        discount_rate = 0.0
+
+    # VAT
+    vat_input = input_fn("VAT % (e.g. 19)> ").strip()
+    if vat_input:
+        try:
+            vat_rate = float(vat_input) / 100.0
+        except ValueError:
+            output_fn("  Invalid number, defaulting to 0%.")
+            vat_rate = 0.0
+    else:
+        vat_rate = 0.0
+
+    if discount_rate > 0 or vat_rate > 0:
+        output_fn(f"  Discount: {discount_rate * 100:.1f}%  VAT: {vat_rate * 100:.1f}%")
+    else:
+        output_fn("  No discount or VAT applied.")
+
+    return discount_rate, vat_rate
+
+
 def run_auth_wizard(
     input_fn: InputFn = input,
     output_fn: OutputFn = print,
@@ -208,6 +255,7 @@ def run_auth_wizard(
     hf_creds = _prompt_huggingface_credentials(input_fn, output_fn, required=False)
     
     azure_region = _prompt_azure_region(input_fn, output_fn)
+    discount_rate, vat_rate = _prompt_pricing_config(input_fn, output_fn)
     
     output_fn("")
     output_fn("=== Saving Credentials ===")
@@ -234,8 +282,20 @@ def run_auth_wizard(
         except Exception as exc:
             output_fn(f"  Warning: Failed to save HuggingFace credentials: {exc}")
     
+    # Persist pricing configuration to config.toml
+    try:
+        config_path = save_pricing_config(
+            azure_region=azure_region,
+            discount_rate=discount_rate,
+            vat_rate=vat_rate,
+        )
+        output_fn(f"  Pricing config: {config_path}")
+    except Exception as exc:
+        output_fn(f"  Warning: Failed to save pricing config: {exc}")
+    
     output_fn("")
     output_fn("Credentials saved to system keyring.")
+    output_fn("Pricing saved to config.toml.")
     output_fn("")
     
     return dbx_creds, hf_creds, azure_region

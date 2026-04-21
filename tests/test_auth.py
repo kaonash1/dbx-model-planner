@@ -19,6 +19,7 @@ from dbx_model_planner.auth.wizard import (
     DATABRICKS_CREDENTIAL_NAME,
     HUGGINGFACE_CREDENTIAL_NAME,
     _is_valid_databricks_url,
+    _prompt_pricing_config,
     _validate_databricks_connection,
     _validate_huggingface_token,
 )
@@ -171,6 +172,41 @@ class ClearStoredCredentialsTests(unittest.TestCase):
         
         mock_delete.assert_not_called()
         self.assertIn("Cancelled.", outputs)
+
+
+class PricingConfigPromptTests(unittest.TestCase):
+    """Tests for _prompt_pricing_config()."""
+
+    def test_accepts_discount_and_vat(self) -> None:
+        inputs = iter(["37.5", "19"])
+        outputs: list[str] = []
+        discount, vat = _prompt_pricing_config(
+            input_fn=lambda _: next(inputs),
+            output_fn=lambda msg: outputs.append(msg),
+        )
+        self.assertAlmostEqual(discount, 0.375)
+        self.assertAlmostEqual(vat, 0.19)
+
+    def test_defaults_to_zero_on_empty(self) -> None:
+        inputs = iter(["", ""])
+        outputs: list[str] = []
+        discount, vat = _prompt_pricing_config(
+            input_fn=lambda _: next(inputs),
+            output_fn=lambda msg: outputs.append(msg),
+        )
+        self.assertEqual(discount, 0.0)
+        self.assertEqual(vat, 0.0)
+        self.assertTrue(any("No discount or VAT" in o for o in outputs))
+
+    def test_handles_invalid_input(self) -> None:
+        inputs = iter(["abc", "xyz"])
+        outputs: list[str] = []
+        discount, vat = _prompt_pricing_config(
+            input_fn=lambda _: next(inputs),
+            output_fn=lambda msg: outputs.append(msg),
+        )
+        self.assertEqual(discount, 0.0)
+        self.assertEqual(vat, 0.0)
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ from ..auth import (
 )
 from ..collectors.databricks import DatabricksAPIError, DatabricksInventoryCollector
 from ..collectors.databricks.inventory import enrich_dbu_rates
-from ..config import AppConfig, WorkloadType, WORKLOAD_DBU_PRESETS, WORKLOAD_LABELS, _WORKLOAD_CYCLE
+from ..config import AppConfig, WorkloadType, WORKLOAD_DBU_PRESETS, WORKLOAD_LABELS, _WORKLOAD_CYCLE, save_pricing_config
 from ..domain import ModelFamily, WorkloadProfile
 from ..planners import recommend_compute_for_model
 from .keys import (
@@ -113,6 +113,53 @@ def _wait_for_thread(
     return True
 
 
+def _prompt_initial_pricing_setup(console: Console, config: AppConfig) -> None:
+    """Prompt the user for pricing config when no Azure region is set."""
+    console.print()
+    console.print("[bold yellow]Pricing Setup Required[/bold yellow]")
+    console.print("No Azure region is configured. Please provide pricing information.")
+    console.print()
+
+    # Azure region (required)
+    while True:
+        region = console.input("[bold]Azure region[/bold] (e.g. eastus, westeurope): ").strip()
+        if region:
+            break
+        console.print("[red]Azure region is required.[/red]")
+
+    # Discount rate (optional)
+    discount_input = console.input("[bold]Discount rate %[/bold] [dim](default 0)[/dim]: ").strip()
+    try:
+        discount_rate = max(0.0, min(1.0, float(discount_input) / 100.0)) if discount_input else 0.0
+    except ValueError:
+        discount_rate = 0.0
+        console.print("[yellow]Invalid discount rate, using 0%.[/yellow]")
+
+    # VAT rate (optional)
+    vat_input = console.input("[bold]VAT rate %[/bold] [dim](default 0)[/dim]: ").strip()
+    try:
+        vat_rate = max(0.0, min(1.0, float(vat_input) / 100.0)) if vat_input else 0.0
+    except ValueError:
+        vat_rate = 0.0
+        console.print("[yellow]Invalid VAT rate, using 0%.[/yellow]")
+
+    # Apply to config
+    config.pricing.azure_region = region
+    config.pricing.discount_rate = discount_rate
+    config.pricing.vat_rate = vat_rate
+
+    # Persist to config file
+    try:
+        save_pricing_config(
+            azure_region=region,
+            discount_rate=discount_rate,
+            vat_rate=vat_rate,
+        )
+        console.print("[green]Pricing configuration saved.[/green]")
+    except Exception:
+        console.print("[yellow]Could not save pricing config to file (values applied in memory).[/yellow]")
+
+
 def run_tui(*, config: AppConfig) -> int:
     """Run the interactive TUI application.
 
@@ -137,6 +184,10 @@ def run_tui(*, config: AppConfig) -> int:
     # over config file, but env var / config file can still override).
     if azure_region and not config.pricing.azure_region:
         config.pricing.azure_region = azure_region
+
+    # -- Step 1b: Pricing setup (pre-TUI, if no region configured) -----
+    if not config.pricing.azure_region:
+        _prompt_initial_pricing_setup(console, config)
 
     # -- Step 2: Live inventory sync (pre-TUI, normal terminal) --------
     console.print()
@@ -305,12 +356,17 @@ def _fetch_dbu_rates_background(
     live: Live,
     console: Console,
 ) -> None:
-    """Fetch DBU rates from Azure pricing page in a background thread.
+    """Fetch DBU rates from Azure pricing page in a background thread (non-blocking).
 
     Also fetches per-DBU unit prices from the Azure Retail Prices API
     so that DBU costs are in USD.
     """
     if state.inventory is None:
+        return
+
+    # Don't start a second fetch if one is already in progress
+    if state.active_dbu_thread and state.active_dbu_thread.is_alive():
+        state.status_message = "DBU rate fetch already in progress..."
         return
 
     state.status_message = "Fetching DBU rates from Azure pricing page..."
@@ -339,35 +395,35 @@ def _fetch_dbu_rates_background(
         except Exception:
             pass  # Non-fatal; we'll fall back to presets
 
+    def _finalize() -> None:
+        if "entries" in result:
+            entries = result["entries"]
+            cache = build_dbu_rate_cache(entries)
+            count = enrich_dbu_rates(state.inventory.compute, cache.as_dict())
+
+            # Attach per-DBU unit prices to cache if fetched
+            unit_prices = result.get("unit_prices")
+            if unit_prices:
+                cache.dbu_unit_prices = unit_prices
+                cache.unit_price_currency = config.pricing.currency_code
+                state.dbu_unit_prices = dict(unit_prices)
+                state.dbu_unit_price_currency = config.pricing.currency_code
+                _sync_dbu_unit_price(state, config)
+
+            state.status_message = f"Loaded {count} DBU rates from Azure pricing page."
+            try:
+                save_dbu_cache(cache)
+            except Exception:
+                pass
+        elif "error" in result:
+            state.status_message = f"DBU rate fetch failed: {result['error']}"
+        else:
+            state.status_message = ""
+
     thread = threading.Thread(target=_fetch, daemon=True)
     thread.start()
-
-    if not _wait_for_thread(thread, state, live, console):
-        return
-
-    if "entries" in result:
-        entries = result["entries"]
-        cache = build_dbu_rate_cache(entries)
-        count = enrich_dbu_rates(state.inventory.compute, cache.as_dict())
-
-        # Attach per-DBU unit prices to cache if fetched
-        unit_prices = result.get("unit_prices")
-        if unit_prices:
-            cache.dbu_unit_prices = unit_prices
-            cache.unit_price_currency = config.pricing.currency_code
-            state.dbu_unit_prices = dict(unit_prices)
-            state.dbu_unit_price_currency = config.pricing.currency_code
-            _sync_dbu_unit_price(state, config)
-
-        state.status_message = f"Loaded {count} DBU rates from Azure pricing page."
-        try:
-            save_dbu_cache(cache)
-        except Exception:
-            pass
-    elif "error" in result:
-        state.status_message = f"DBU rate fetch failed: {result['error']}"
-    else:
-        state.status_message = ""
+    state.active_dbu_thread = thread
+    state.active_dbu_finalizer = _finalize
 
 
 def _fetch_prices_background(
@@ -376,8 +432,13 @@ def _fetch_prices_background(
     live: Live,
     console: Console,
 ) -> None:
-    """Fetch Azure VM prices in a background thread."""
+    """Fetch Azure VM prices in a background thread (non-blocking)."""
     if state.inventory is None:
+        return
+
+    # Don't start a second fetch if one is already in progress
+    if state.active_price_thread and state.active_price_thread.is_alive():
+        state.status_message = "Price fetch already in progress..."
         return
 
     state.pricing_loading = True
@@ -399,28 +460,25 @@ def _fetch_prices_background(
         except Exception as exc:
             result["error"] = str(exc)
 
+    def _finalize() -> None:
+        state.pricing_loading = False
+        if "error" in result:
+            state.pricing_error = result["error"]
+            state.status_message = f"Pricing error: {result['error']}"
+            return
+        cache = result.get("cache")
+        if cache is not None:
+            state.vm_pricing = cache.as_vm_pricing_dict()
+            state.pricing_loaded = True
+            state.pricing_region = cache.region
+            state.pricing_node_count = len(state.vm_pricing)
+            state.pricing_error = None
+            state.status_message = f"Loaded {len(state.vm_pricing)} prices ({cache.region})"
+
     thread = threading.Thread(target=_fetch, daemon=True)
     thread.start()
-
-    if not _wait_for_thread(thread, state, live, console):
-        state.pricing_loading = False
-        return
-
-    state.pricing_loading = False
-
-    if "error" in result:
-        state.pricing_error = result["error"]
-        state.status_message = f"Pricing error: {result['error']}"
-        return
-
-    cache = result.get("cache")
-    if cache is not None:
-        state.vm_pricing = cache.as_vm_pricing_dict()
-        state.pricing_loaded = True
-        state.pricing_region = cache.region
-        state.pricing_node_count = len(state.vm_pricing)
-        state.pricing_error = None
-        state.status_message = f"Loaded {len(state.vm_pricing)} prices ({cache.region})"
+    state.active_price_thread = thread
+    state.active_price_finalizer = _finalize
 
 
 def _run_tui_loop(
@@ -443,9 +501,6 @@ def _run_tui_loop(
             _fetch_prices_background(state, config, live, console)
             live.update(build_layout(state, console.height))
 
-        if state.should_quit:
-            return
-
         # Fetch DBU rates in background if not cached
         _has_dbu = any(n.dbu_per_hour is not None for n in (state.inventory.compute if state.inventory else []))
         if not _has_dbu:
@@ -458,19 +513,38 @@ def _run_tui_loop(
             _fetch_dbu_unit_prices_background(state, config, live, console)
             live.update(build_layout(state, console.height))
 
-        if state.should_quit:
-            return
-
         if not has_region and not state.pricing_loaded:
-            state.status_message = "No Azure region set. Press $ to configure pricing."
+            state.status_message = "No Azure region set. Press $ to configure or run 'auth login'."
 
         while not state.should_quit:
-            # Read a keypress (blocking)
-            key = read_key()
+            # -- Check if background fetches completed -----------------
+            if state.active_price_thread and not state.active_price_thread.is_alive():
+                if state.active_price_finalizer:
+                    state.active_price_finalizer()
+                    state.active_price_finalizer = None
+                state.active_price_thread = None
+                live.update(build_layout(state, console.height))
+
+            if state.active_dbu_thread and not state.active_dbu_thread.is_alive():
+                if state.active_dbu_finalizer:
+                    state.active_dbu_finalizer()
+                    state.active_dbu_finalizer = None
+                state.active_dbu_thread = None
+                live.update(build_layout(state, console.height))
+
+            # Read a keypress (non-blocking so we can poll threads)
+            key = read_key_nonblocking(0.15)
+            if key is None:
+                continue
+
+            # Clear stale status messages on any keypress so footer
+            # keybinding hints reappear.  Handlers can still set new
+            # status messages that will show until the next keypress.
+            state.status_message = ""
 
             # Handle the key based on current input mode
             if state.input_mode == InputMode.SEARCH:
-                _handle_search_input(state, key)
+                _handle_search_input(state, key, config, hf_creds, live, console)
             elif state.input_mode == InputMode.MODEL_ID:
                 _handle_model_id_input(state, key, config, hf_creds, live, console)
             elif state.input_mode == InputMode.PRICING:
@@ -620,7 +694,18 @@ def _handle_normal_input(
     # -- What-if view from model fit view --------------------------------
     if key in ("w", "W"):
         if state.view == View.MODEL_FIT and state.model_profile is not None:
-            _enter_whatif(state)
+            if state.model_profile.family in (ModelFamily.EMBEDDING, ModelFamily.RERANKER):
+                state.status_message = "What-if analysis is not available for embedding/reranker models"
+            else:
+                _enter_whatif(state)
+        return
+
+    # -- What-if TurboQuant KV cache toggle (K) ---------------------------
+    if key == "K":
+        if state.view == View.WHAT_IF:
+            state.whatif_turboquant = not state.whatif_turboquant
+            tq = "ON" if state.whatif_turboquant else "OFF"
+            state.status_message = f"TurboQuant KV cache compression: {tq}"
         return
 
     # -- What-if selector navigation (left/right/h/l/Tab) -----------------
@@ -659,11 +744,19 @@ def _handle_normal_input(
             if entry:
                 # Fit the selected model against workspace
                 state.previous_view = View.MODEL_BROWSE
+                state.model_gated = entry.gated
                 _fetch_model_threaded(state, entry.model_id, config, hf_creds, live, console)
         return
 
 
-def _handle_search_input(state: TuiState, key: str) -> None:
+def _handle_search_input(
+    state: TuiState,
+    key: str,
+    config: AppConfig,
+    hf_creds: HuggingFaceCredentials | None,
+    live: Live,
+    console: Console,
+) -> None:
     """Handle keypresses in search mode."""
     is_browse = state.view == View.MODEL_BROWSE
 
@@ -684,9 +777,18 @@ def _handle_search_input(state: TuiState, key: str) -> None:
     if key == KEY_ENTER:
         state.input_mode = InputMode.NORMAL
         if is_browse:
-            state.rebuild_browse_list()
-            state.browse_selected_index = 0
-            state.browse_scroll_offset = 0
+            search_text = state.browse_search.strip()
+            parts = search_text.split("/")
+            if len(parts) == 2 and all(p.strip() for p in parts) and " " not in search_text:
+                # Looks like a HuggingFace model ID (e.g. meta-llama/Llama-3-8B)
+                # Fetch directly from HuggingFace
+                state.browse_search = ""
+                state.previous_view = View.MODEL_BROWSE
+                _fetch_model_threaded(state, search_text, config, hf_creds, live, console)
+            else:
+                state.rebuild_browse_list()
+                state.browse_selected_index = 0
+                state.browse_scroll_offset = 0
         else:
             state.rebuild_node_lists()
             state.selected_index = 0
@@ -1080,6 +1182,17 @@ def _apply_pricing_setup(
     # with the correct per-DBU prices for the new region.
     _fetch_dbu_unit_prices_background(state, config, live, console)
 
+    # Persist updated pricing config to config.toml so values
+    # survive across sessions.
+    try:
+        save_pricing_config(
+            azure_region=config.pricing.azure_region,
+            discount_rate=config.pricing.discount_rate,
+            vat_rate=config.pricing.vat_rate,
+        )
+    except Exception:
+        pass  # non-critical; values are already applied in memory
+
 
 def _fetch_dbu_unit_prices_background(
     state: TuiState,
@@ -1087,12 +1200,16 @@ def _fetch_dbu_unit_prices_background(
     live: Live,
     console: Console,
 ) -> None:
-    """Fetch per-DBU unit prices from the Azure Retail Prices API.
+    """Fetch per-DBU unit prices from the Azure Retail Prices API (non-blocking).
 
     This is a lightweight call (unlike the 22 MB HTML page fetch).
     Updates the DBU rate cache and state with correct per-DBU prices
     in USD.
     """
+    # Don't start if a DBU fetch is already running
+    if state.active_dbu_thread and state.active_dbu_thread.is_alive():
+        return
+
     result: dict[str, object] = {}
 
     def _fetch() -> None:
@@ -1106,33 +1223,33 @@ def _fetch_dbu_unit_prices_background(
         except Exception as exc:
             result["error"] = str(exc)
 
+    def _finalize() -> None:
+        unit_prices = result.get("unit_prices")
+        if unit_prices:
+            state.dbu_unit_prices = dict(unit_prices)
+            state.dbu_unit_price_currency = config.pricing.currency_code
+            _sync_dbu_unit_price(state, config)
+
+            # Persist to the existing DBU rate cache
+            try:
+                cache = load_dbu_cache()
+                if cache is not None:
+                    cache.dbu_unit_prices = unit_prices
+                    cache.unit_price_currency = config.pricing.currency_code
+                    save_dbu_cache(cache)
+            except Exception:
+                pass
+
+            wt_label = state.workload_type.replace("_", " ").title()
+            state.status_message = (
+                f"DBU price updated: {config.pricing.currency_code} "
+                f"{state.dbu_rate_per_unit:.4f}/DBU ({wt_label})"
+            )
+
     thread = threading.Thread(target=_fetch, daemon=True)
     thread.start()
-
-    if not _wait_for_thread(thread, state, live, console):
-        return
-
-    unit_prices = result.get("unit_prices")
-    if unit_prices:
-        state.dbu_unit_prices = dict(unit_prices)
-        state.dbu_unit_price_currency = config.pricing.currency_code
-        _sync_dbu_unit_price(state, config)
-
-        # Persist to the existing DBU rate cache
-        try:
-            cache = load_dbu_cache()
-            if cache is not None:
-                cache.dbu_unit_prices = unit_prices
-                cache.unit_price_currency = config.pricing.currency_code
-                save_dbu_cache(cache)
-        except Exception:
-            pass
-
-        wt_label = state.workload_type.replace("_", " ").title()
-        state.status_message = (
-            f"DBU price updated: {config.pricing.currency_code} "
-            f"{state.dbu_rate_per_unit:.4f}/DBU ({wt_label})"
-        )
+    state.active_dbu_thread = thread
+    state.active_dbu_finalizer = _finalize
 
 
 # -- What-if view helpers --------------------------------------------------
@@ -1149,6 +1266,7 @@ def _enter_whatif(state: TuiState) -> None:
     state.whatif_selector_row = 0  # Start on quant selector
     state.whatif_table_index = 0
     state.whatif_table_offset = 0
+    state.whatif_turboquant = False  # Start with TurboQuant off
     state.status_message = ""
 
 

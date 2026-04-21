@@ -38,6 +38,10 @@ class ModelProfile:
     num_hidden_layers: int | None = None
     num_kv_heads: int | None = None  # GQA key-value heads (often < num_attention_heads)
     head_dim: int | None = None      # Per-head dimension in attention
+    # VLM split: vision encoder vs. language model parameter counts.
+    # When set, quantization applies only to the text/language portion;
+    # vision encoder weights are kept at full precision (fp16/bf16).
+    vision_parameter_count: int | None = None
     dtype_options: list[str] = field(default_factory=list)
     quantization_options: list[str] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=list)
@@ -92,6 +96,7 @@ class WorkspaceComputeProfile:
     gpu_family: str | None = None
     gpu_count: int = 0
     gpu_memory_gb: float | None = None
+    gpu_memory_bandwidth_gb_s: float | None = None
     vcpu_count: int | None = None
     memory_gb: float | None = None
     local_disk_gb: float | None = None

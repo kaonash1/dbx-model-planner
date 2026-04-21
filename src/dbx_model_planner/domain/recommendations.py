@@ -16,8 +16,12 @@ class CandidateCompute:
     recommended_quantization: str | None = None
     estimated_memory_gb: float | None = None
     estimated_headroom_gb: float | None = None
+    estimate_incomplete: bool = False
+    best_quantization: str | None = None
+    estimated_tok_s: float | None = None
     notes: list[str] = field(default_factory=list)
     cost: CostProfile | None = None
+    composite_score: int | None = None
 
 
 @dataclass(slots=True)
@@ -40,6 +44,7 @@ class CandidateModel:
     risk_level: RiskLevel = RiskLevel.MEDIUM
     recommended_quantization: str | None = None
     estimated_memory_gb: float | None = None
+    estimate_incomplete: bool = False
     notes: list[str] = field(default_factory=list)
     cost: CostProfile | None = None
 

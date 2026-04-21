@@ -7,6 +7,7 @@ from dbx_model_planner.domain.profiles import ModelArtifactProfile, ModelProfile
 from dbx_model_planner.engines.fit import (
     DEFAULT_CONTEXT_LENGTH,
     DEFAULT_RUNTIME_OVERHEAD_GB,
+    KvCacheQuant,
     MemoryEstimate,
     assess_compute_for_models,
     assess_model_on_compute,
@@ -252,6 +253,200 @@ class EstimateModelMemoryTests(unittest.TestCase):
         self.assertLess(est.kv_cache_gb, 1.0)
 
 
+class TurboQuantKvCacheTests(unittest.TestCase):
+    """Test TurboQuant KV cache compression."""
+
+    def test_kv_cache_quant_enum_properties(self) -> None:
+        """KvCacheQuant enum has correct bytes_per_element."""
+        self.assertEqual(KvCacheQuant.FP16.bytes_per_element, 2.0)
+        self.assertAlmostEqual(KvCacheQuant.TURBOQUANT.bytes_per_element, 0.34)
+        self.assertAlmostEqual(KvCacheQuant.TURBOQUANT.compression_ratio, 2.0 / 0.34, places=1)
+
+    def test_turboquant_reduces_kv_cache_architecture_aware(self) -> None:
+        """TurboQuant should significantly reduce KV cache for arch-aware models."""
+        model = ModelProfile(
+            model_id="test/llama3-8b",
+            family=ModelFamily.LLM,
+            modality=ModelModality.TEXT,
+            source="test",
+            task="text-generation",
+            parameter_count=8_000_000_000,
+            context_length=8192,
+            num_hidden_layers=32,
+            num_kv_heads=8,
+            head_dim=128,
+            quantization_options=["fp16"],
+        )
+        est_fp16 = estimate_model_memory_gb(model, "fp16", kv_quant=KvCacheQuant.FP16)
+        est_tq = estimate_model_memory_gb(model, "fp16", kv_quant=KvCacheQuant.TURBOQUANT)
+
+        # TurboQuant should yield ~5.9× smaller KV cache
+        self.assertGreater(est_fp16.kv_cache_gb, est_tq.kv_cache_gb * 4)
+        # Total memory should be lower
+        self.assertGreater(est_fp16.total_gb, est_tq.total_gb)
+        # Model weights and runtime overhead should be identical
+        model_gb_fp16 = est_fp16.total_gb - est_fp16.kv_cache_gb - est_fp16.runtime_overhead_gb
+        model_gb_tq = est_tq.total_gb - est_tq.kv_cache_gb - est_tq.runtime_overhead_gb
+        self.assertAlmostEqual(model_gb_fp16, model_gb_tq, places=2)
+
+    def test_turboquant_reduces_kv_cache_fallback(self) -> None:
+        """TurboQuant should also reduce KV cache for fallback (no arch) models."""
+        model = _llm(params_b=7.0, context=32768)
+        est_fp16 = estimate_model_memory_gb(model, "fp16", kv_quant=KvCacheQuant.FP16)
+        est_tq = estimate_model_memory_gb(model, "fp16", kv_quant=KvCacheQuant.TURBOQUANT)
+
+        self.assertGreater(est_fp16.kv_cache_gb, est_tq.kv_cache_gb * 4)
+
+    def test_turboquant_does_not_affect_embedding_models(self) -> None:
+        """Embedding models don't use KV cache, so TurboQuant has no effect."""
+        model = _embedding(params_b=0.335)
+        est_fp16 = estimate_model_memory_gb(model, "fp16", kv_quant=KvCacheQuant.FP16)
+        est_tq = estimate_model_memory_gb(model, "fp16", kv_quant=KvCacheQuant.TURBOQUANT)
+
+        # Embedding KV cache is a fixed 0.2 GB, unaffected by kv_quant
+        self.assertEqual(est_fp16.kv_cache_gb, est_tq.kv_cache_gb)
+        self.assertEqual(est_fp16.total_gb, est_tq.total_gb)
+
+    def test_turboquant_default_is_fp16(self) -> None:
+        """Default kv_quant should be FP16 (no compression)."""
+        model = _llm(params_b=7.0)
+        est_default = estimate_model_memory_gb(model, "fp16")
+        est_explicit_fp16 = estimate_model_memory_gb(model, "fp16", kv_quant=KvCacheQuant.FP16)
+
+        self.assertEqual(est_default.total_gb, est_explicit_fp16.total_gb)
+
+    def test_turboquant_enables_fit_on_smaller_gpu(self) -> None:
+        """A model that doesn't fit at fp16 KV may fit with TurboQuant."""
+        # 70B model at int4: ~35 GB model + large KV cache
+        model = ModelProfile(
+            model_id="test/llama3-70b",
+            family=ModelFamily.LLM,
+            modality=ModelModality.TEXT,
+            source="test",
+            task="text-generation",
+            parameter_count=70_000_000_000,
+            context_length=32768,
+            num_hidden_layers=80,
+            num_kv_heads=8,
+            head_dim=128,
+            quantization_options=["int4"],
+        )
+        est_fp16 = estimate_model_memory_gb(model, "int4", kv_quant=KvCacheQuant.FP16)
+        est_tq = estimate_model_memory_gb(model, "int4", kv_quant=KvCacheQuant.TURBOQUANT)
+
+        # The difference should be substantial on a 70B model with 32K context
+        kv_savings_gb = est_fp16.kv_cache_gb - est_tq.kv_cache_gb
+        self.assertGreater(kv_savings_gb, 5.0)  # Significant savings
+
+
+class VlmSplitQuantizationTests(unittest.TestCase):
+    """Test VLM-aware split quantization (vision@fp16, text@quantized)."""
+
+    def _vlm_with_vision_split(
+        self,
+        total_params_b: float = 8.0,
+        vision_params_b: float = 0.4,
+    ) -> ModelProfile:
+        """Create a VLM with known vision/text parameter split."""
+        return ModelProfile(
+            model_id=f"test/vlm-{total_params_b}b",
+            family=ModelFamily.VLM,
+            modality=ModelModality.IMAGE_TEXT,
+            source="test",
+            task="image-text-to-text",
+            parameter_count=int(total_params_b * 1e9),
+            vision_parameter_count=int(vision_params_b * 1e9),
+            context_length=8192,
+            num_hidden_layers=32,
+            num_kv_heads=8,
+            head_dim=128,
+            quantization_options=["bf16", "fp16", "int8", "int4"],
+        )
+
+    def test_split_quantization_int4_saves_less_than_uniform(self) -> None:
+        """INT4 on a VLM with split data should use more memory than uniform INT4.
+
+        Because the vision encoder stays at fp16 instead of being quantized.
+        """
+        model = self._vlm_with_vision_split(total_params_b=8.0, vision_params_b=0.4)
+
+        est_fp16 = estimate_model_memory_gb(model, "fp16")
+        est_int4 = estimate_model_memory_gb(model, "int4")
+
+        # INT4 should save memory vs fp16
+        self.assertLess(est_int4.total_gb, est_fp16.total_gb)
+
+        # But the savings should be less than for a model without vision split
+        # because the 0.4B vision params stay at fp16
+        model_no_split = ModelProfile(
+            model_id="test/vlm-nosplit",
+            family=ModelFamily.VLM,
+            modality=ModelModality.IMAGE_TEXT,
+            source="test",
+            task="image-text-to-text",
+            parameter_count=8_000_000_000,
+            vision_parameter_count=None,  # No split data
+            context_length=8192,
+            num_hidden_layers=32,
+            num_kv_heads=8,
+            head_dim=128,
+            quantization_options=["bf16", "fp16", "int8", "int4"],
+        )
+        est_nosplit_int4 = estimate_model_memory_gb(model_no_split, "int4")
+
+        # With split, INT4 should use MORE memory than without split
+        # (because vision params stay at fp16 in split mode)
+        self.assertGreater(est_int4.total_gb, est_nosplit_int4.total_gb)
+
+    def test_split_quantization_fp16_identical_to_uniform(self) -> None:
+        """At fp16, split vs uniform should produce the same result."""
+        model = self._vlm_with_vision_split(total_params_b=8.0, vision_params_b=0.4)
+
+        model_no_split = ModelProfile(
+            model_id="test/vlm-nosplit",
+            family=ModelFamily.VLM,
+            modality=ModelModality.IMAGE_TEXT,
+            source="test",
+            task="image-text-to-text",
+            parameter_count=8_000_000_000,
+            vision_parameter_count=None,
+            context_length=8192,
+            num_hidden_layers=32,
+            num_kv_heads=8,
+            head_dim=128,
+            quantization_options=["bf16", "fp16", "int8", "int4"],
+        )
+
+        est_split = estimate_model_memory_gb(model, "fp16")
+        est_nosplit = estimate_model_memory_gb(model_no_split, "fp16")
+
+        # At fp16, both vision and text are at fp16 — should be identical
+        self.assertAlmostEqual(est_split.total_gb, est_nosplit.total_gb, places=2)
+
+    def test_vision_params_stay_at_fp16_during_int4(self) -> None:
+        """Verify the vision portion is kept at fp16 precision."""
+        # 10B total, 1B vision = 9B text
+        model = self._vlm_with_vision_split(total_params_b=10.0, vision_params_b=1.0)
+
+        est = estimate_model_memory_gb(model, "int4")
+
+        # Expected model weight:
+        # vision: 1B * 2 bytes / 1e9 = 2.0 GB (fp16)
+        # text:   9B * 0.5 bytes / 1e9 = 4.5 GB (int4)
+        # total model weight: 6.5 GB
+        model_weight = est.total_gb - est.kv_cache_gb - est.runtime_overhead_gb
+        self.assertAlmostEqual(model_weight, 6.5, places=1)
+
+    def test_no_vision_split_uses_uniform_quantization(self) -> None:
+        """VLM without vision_parameter_count uses uniform quantization."""
+        model = _vlm(params_b=8.0)  # Default _vlm has no vision split
+
+        est_int4 = estimate_model_memory_gb(model, "int4")
+        # 8B * 0.5 bytes / 1e9 = 4.0 GB uniform int4
+        model_weight = est_int4.total_gb - est_int4.kv_cache_gb - est_int4.runtime_overhead_gb
+        self.assertAlmostEqual(model_weight, 4.0, places=1)
+
+
 class AssessModelOnComputeTests(unittest.TestCase):
     """Test assess_model_on_compute for fit level classification."""
 
@@ -277,8 +472,8 @@ class AssessModelOnComputeTests(unittest.TestCase):
 
     def test_borderline_when_tight_memory(self) -> None:
         model = _llm(params_b=7.0)
-        # Find an estimate to figure out a tight GPU size
-        est = estimate_model_memory_gb(model, "int4")
+        # Find an estimate at native precision (fp16) to figure out a tight GPU size
+        est = estimate_model_memory_gb(model, "fp16")
         # GPU just barely enough
         compute = _compute(gpu_mem_gb=est.total_gb + 0.5)
 
